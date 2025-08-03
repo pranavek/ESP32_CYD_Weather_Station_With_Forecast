@@ -1,4 +1,4 @@
-# ESP32 Cheap Yellow Display (CYD) Brick Clock
+# ESP32 Cheap Yellow Display (CYD) Weather Station with 3 days Forecast
 
 This is the accompanying repository for my article "Create an Internet Weather Station with 3 days Forecast on an ESP32 Cheap Yellow Display ("CYD")" available here: 
 
