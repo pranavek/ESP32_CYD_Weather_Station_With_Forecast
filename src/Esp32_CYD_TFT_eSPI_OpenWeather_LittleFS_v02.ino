@@ -158,7 +158,7 @@ void setup() {
   Serial.println(PROGRAM_VERSION);
 
   tft.begin();
-  tft.setRotation(0);  // For 320x480 screen
+  tft.setRotation(2);  // 180° portrait
   tft.fillScreen(TFT_BLACK);
 
   if (!LittleFS.begin()) {
@@ -383,13 +383,15 @@ void drawTime() {
 ***************************************************************************************/
 void drawCurrentWeather() {
   time_t local_time = TIMEZONE.toLocal(now(), &tz1_Code);
-  //String date = "Updated: " + strDate(local_time);
-  String date = "Updated: " + strDate(now());  // see isue https://github.com/Bodmer/OpenWeather/issues/26
+  String date = String(dayShortStr(weekday(local_time))) + "  " +
+                String(monthShortStr(month(local_time))) + " " +
+                String(day(local_time)) + "  " +
+                String(year(local_time));
   String weatherText = "None";
 
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth(" Updated: Mmm 44 44:44 "));  // String width + margin
+  tft.setTextPadding(tft.textWidth(" Www  Mmm 44  4444 "));
   tft.drawString(date, 120, 16);
 
   String weatherIcon = "";
