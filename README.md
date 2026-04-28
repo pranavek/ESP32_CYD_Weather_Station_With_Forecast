@@ -86,15 +86,17 @@ To add a timezone not listed, add `TimeChangeRule` pairs to `NTP_Time.h` followi
 
 ### 4. Upload assets and flash
 
-> ⚠️ Upload the filesystem **before** the sketch — the sketch halts on boot if LittleFS is empty.
+The sketch and filesystem live in separate flash partitions — uploads are independent.
 
-**Step 1 — upload the filesystem (icons, fonts):**
+**Upload the filesystem** (only needed once, or when `data/` assets change):
 - VS Code: PlatformIO sidebar → Project Tasks → `esp32-cyd-st7789` → Platform → **Upload Filesystem Image**
 - CLI: `pio run --target uploadfs`
 
-**Step 2 — flash the sketch:**
+**Flash the sketch** (any time code changes):
 - VS Code: Project Tasks → **Upload**
 - CLI: `pio run --target upload`
+
+> ⚠️ On a **brand new device**, upload the filesystem at least once before powering up — the sketch will hang on boot with "Flash FS initialisation failed!" if LittleFS has never been written.
 
 ## Using PlatformIO (VS Code)
 
@@ -168,11 +170,11 @@ build_flags =
 
 ### Upload filesystem and sketch
 
-> ⚠️ Always upload the filesystem **before** the sketch — the sketch halts on boot if LittleFS is empty.
+> ⚠️ On a brand new device, upload the filesystem at least once before the first boot — the sketch will hang if LittleFS has never been written. After that, filesystem and sketch uploads are independent.
 
 **Step 1 — upload the filesystem image:**
 
-- VS Code: PlatformIO sidebar → Project Tasks → `esp32-cyd` → Platform → **Upload Filesystem Image**
+- VS Code: PlatformIO sidebar → Project Tasks → `esp32-cyd-st7789` → Platform → **Upload Filesystem Image**
 - CLI: `pio run --target uploadfs`
 
 **Step 2 — flash the sketch:**
