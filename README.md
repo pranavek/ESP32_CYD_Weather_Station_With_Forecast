@@ -204,8 +204,8 @@ Uncomment these defines in the main `.ino` to enable additional output:
 ## Development Environment
 
 ```
-Arduino IDE 2.3.6 (Windows)
-arduino-esp32 boards 3.2.0  https://github.com/espressif/arduino-esp32
+VS Code with PlatformIO IDE extension
+espressif32 platform (arduino-esp32 boards 3.2.0)  https://github.com/espressif/arduino-esp32
 ```
 
 ## Credits
