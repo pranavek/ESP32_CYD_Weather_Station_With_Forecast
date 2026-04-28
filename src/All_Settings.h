@@ -27,6 +27,10 @@
 // Update every 30 minutes, up to 1000 request per day are free (viz average of ~40 per hour)
 const int UPDATE_INTERVAL_SECS = 30UL * 60UL;  // 30 minutes
 
+// Screen off hours — backlight cuts at NIGHT_OFF_HOUR:59, comes back at NIGHT_ON_HOUR:00
+#define NIGHT_OFF_HOUR  23
+#define NIGHT_ON_HOUR    6
+
 // Pins for the TFT interface are defined in the User_Config.h file inside the TFT_eSPI library
 
 // For units use "metric" or "imperial"

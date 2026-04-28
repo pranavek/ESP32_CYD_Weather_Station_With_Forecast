@@ -113,6 +113,8 @@ OW_forecast* forecast;
 
 boolean booted = true;
 
+float prevPressure = 0.0f;
+
 GfxUi ui = GfxUi(&tft);  // Jpeg and bmpDraw functions
 
 long lastDownloadUpdate = millis();
@@ -235,22 +237,29 @@ void setup() {
 **                          Loop
 ***************************************************************************************/
 void loop() {
+  time_t local_t = TIMEZONE.toLocal(now(), &tz1_Code);
+  uint8_t h = hour(local_t);
+  uint8_t m = minute(local_t);
+  bool nightMode = !booted &&
+                   ((h < NIGHT_ON_HOUR) || (h == NIGHT_OFF_HOUR && m >= 59));
 
-  // Check if we should update weather information
+  digitalWrite(TFT_BL, nightMode ? LOW : HIGH);
+
+  // Weather update — timer not advanced during night so wake-up fetch is immediate
   if (booted || (millis() - lastDownloadUpdate > 1000UL * UPDATE_INTERVAL_SECS)) {
-    updateData();
-    lastDownloadUpdate = millis();
+    if (!nightMode) {
+      updateData();
+      lastDownloadUpdate = millis();
+    }
   }
 
-  // If minute has changed then request new time from NTP server
+  // Clock update — skip draw and NTP sync during night
   if (booted || minute() != lastMinute) {
-    // Update displayed time first as we may have to wait for a response
-    drawTime();
     lastMinute = minute();
-
-    // Request and synchronise the local clock
-    syncTime();
-
+    if (!nightMode) {
+      drawTime();
+      syncTime();
+    }
 #ifdef SCREEN_SERVER
     screenServer();
 #endif
@@ -353,10 +362,23 @@ void drawProgress(uint8_t percentage, String text) {
 **                          Draw the clock digits
 ***************************************************************************************/
 void drawTime() {
+  // Date — redraws every minute so midnight crossover is always correct
+  tft.loadFont(AA_FONT_SMALL, LittleFS);
+  time_t local_time = TIMEZONE.toLocal(now(), &tz1_Code);
+  String date = String(dayShortStr(weekday(local_time))) + "  " +
+                String(monthShortStr(month(local_time))) + " " +
+                String(day(local_time)) + "  " +
+                String(year(local_time));
+  tft.setTextDatum(BC_DATUM);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.setTextPadding(tft.textWidth(" Www  Mmm 44  4444 "));
+  tft.drawString(date, 120, 16);
+  tft.unloadFont();
+
   tft.loadFont(AA_FONT_LARGE, LittleFS);
 
   // Convert UTC to local time, returns zone code in tz1_Code, e.g "GMT"
-  time_t local_time = TIMEZONE.toLocal(now(), &tz1_Code);
+  local_time = TIMEZONE.toLocal(now(), &tz1_Code);
 
   String timeNow = "";
 
@@ -382,18 +404,7 @@ void drawTime() {
 **                          Draw the current weather
 ***************************************************************************************/
 void drawCurrentWeather() {
-  time_t local_time = TIMEZONE.toLocal(now(), &tz1_Code);
-  String date = String(dayShortStr(weekday(local_time))) + "  " +
-                String(monthShortStr(month(local_time))) + " " +
-                String(day(local_time)) + "  " +
-                String(year(local_time));
   String weatherText = "None";
-
-  tft.setTextDatum(BC_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth(" Www  Mmm 44  4444 "));
-  tft.drawString(date, 120, 16);
-
   String weatherIcon = "";
 
   String currentSummary = forecast->main[0];
@@ -417,9 +428,11 @@ void drawCurrentWeather() {
   splitPoint = splitIndex(weatherText);
 
   tft.setTextPadding(xpos - 100);  // xpos - icon width
-  if (splitPoint) tft.drawString(weatherText.substring(0, splitPoint), xpos, 69);
-  else tft.drawString(" ", xpos, 69);
-  tft.drawString(weatherText.substring(splitPoint), xpos, 86);
+  tft.drawString(splitPoint ? weatherText.substring(0, splitPoint) : weatherText, xpos, 69);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("feels " + String(forecast->feels_like[0], 0) + "o", xpos, 86);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
 
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.setTextDatum(TR_DATUM);
@@ -439,16 +452,20 @@ void drawCurrentWeather() {
   tft.setTextPadding(tft.textWidth("888 m/s"));  // Max string length?
   tft.drawString(weatherText, 124, 136);
 
+  float curPressure = forecast->pressure[0];
   if (units == "imperial") {
-    weatherText = forecast->pressure[0];
-    weatherText += " in";
+    weatherText = String(curPressure, 2) + " in";
   } else {
-    weatherText = String(forecast->pressure[0], 0);
-    weatherText += " hPa";
+    weatherText = String(curPressure, 0) + " hPa";
+    if (prevPressure > 0.0f) {
+      if      (curPressure > prevPressure + 0.5f) weatherText += "^";
+      else if (curPressure < prevPressure - 0.5f) weatherText += "v";
+    }
   }
+  prevPressure = curPressure;
 
   tft.setTextDatum(TR_DATUM);
-  tft.setTextPadding(tft.textWidth(" 8888hPa"));  // Max string length?
+  tft.setTextPadding(tft.textWidth(" 8888hPa^"));
   tft.drawString(weatherText, 230, 136);
 
   int windAngle = (forecast->wind_deg[0] + 22.5) / 45;
