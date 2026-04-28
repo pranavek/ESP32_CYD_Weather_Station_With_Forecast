@@ -8,14 +8,14 @@ Companion repository for the article [Create an Internet Weather Station with 3 
 - **Current conditions** — weather icon (100×100 px), description text, temperature (large font), wind speed + compass direction icon, barometric pressure
 - **Hourly forecast strip** — next four 3-hour slots from now (e.g. 15:00 / 18:00 / 21:00 / 00:00), high/low temperature and 50×50 px weather icon per slot
 - **Astronomy panel** — sunrise/sunset times, moon phase icon (24 phases) + phase name, cloud cover %, humidity %
-- **Live clock** — HH:MM updated every minute via NTP (timezone + DST aware)
+- **Live clock** — HH:MM updated every minute via NTP (timezone + DST aware); header shows current date as `Www  Mmm D  YYYY`
 - **Auto-refresh** — weather data fetched every 15 minutes (configurable); respects the free OpenWeatherMap tier of ~40 requests/hour
 
 ## Display Layout
 
 ```
 ┌─────────────────────────────┐  ↑
-│  Updated: Apr 28  14:32     │  Header (date + time)
+│  Tue  Apr 28  2026          │  Header (date + time)
 │         14:32               │
 ├─────────────────────────────┤
 │  [icon]  Partly Cloudy  18° │  Current weather
