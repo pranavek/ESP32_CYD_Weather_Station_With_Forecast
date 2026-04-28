@@ -22,10 +22,10 @@
 #define WIFI_PASSWORD  "-your-router-password-"
 
 //#define TIMEZONE UK // See NTP_Time.h tab for other "Zone references", UK, usMT etc
-#define TIMEZONE euCET
+#define TIMEZONE usCT
 
-// Update every 15 minutes, up to 1000 request per day are free (viz average of ~40 per hour)
-const int UPDATE_INTERVAL_SECS = 15UL * 60UL;  // 15 minutes
+// Update every 30 minutes, up to 1000 request per day are free (viz average of ~40 per hour)
+const int UPDATE_INTERVAL_SECS = 30UL * 60UL;  // 30 minutes
 
 // Pins for the TFT interface are defined in the User_Config.h file inside the TFT_eSPI library
 
