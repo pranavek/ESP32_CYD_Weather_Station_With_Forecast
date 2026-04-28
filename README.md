@@ -1,4 +1,4 @@
-# ESP32 Cheap Yellow Display (CYD) Weather Station with 3-Day Forecast
+# ESP32 Cheap Yellow Display (CYD) Weather Station with Hourly Forecast
 
 Companion repository for the article [Create an Internet Weather Station with 3 days Forecast on an ESP32 Cheap Yellow Display ("CYD")](https://medium.com/@androidcrypto/create-an-internet-weather-station-with-3-days-forecast-on-an-esp32-cheap-yellow-display-cyd-15eb5c353b1d).
 
@@ -6,7 +6,7 @@ Companion repository for the article [Create an Internet Weather Station with 3 
 ## Features
 
 - **Current conditions** — weather icon (100×100 px), description text, temperature (large font), wind speed + compass direction icon, barometric pressure
-- **4-day forecast strip** — day abbreviation, high/low temperatures, 50×50 px weather icon for each day
+- **Hourly forecast strip** — next four 3-hour slots from now (e.g. 15:00 / 18:00 / 21:00 / 00:00), high/low temperature and 50×50 px weather icon per slot
 - **Astronomy panel** — sunrise/sunset times, moon phase icon (24 phases) + phase name, cloud cover %, humidity %
 - **Live clock** — HH:MM updated every minute via NTP (timezone + DST aware)
 - **Auto-refresh** — weather data fetched every 15 minutes (configurable); respects the free OpenWeatherMap tier of ~40 requests/hour
@@ -21,9 +21,9 @@ Companion repository for the article [Create an Internet Weather Station with 3 
 │  [icon]  Partly Cloudy  18° │  Current weather
 │          3 m/s  ↗  1013 hPa │
 ├─────────────────────────────┤
-│ MON  TUE  WED  THU          │  4-day forecast
+│15:00 18:00 21:00 00:00      │  Next 4 × 3-hour slots
 │ [i]  [i]  [i]  [i]          │
-│18 12 17 11 15 9 14 8        │
+│18 17 17 16 15 15 12 12      │
 ├─────────────────────────────┤
 │ Sun  05:42        ☽  Waxing │  Astronomy
 │      20:11    Cloud  23%    │
@@ -116,23 +116,21 @@ esp32-cyd-weather/
 ### `platformio.ini`
 
 ```ini
-[env:esp32-cyd]
+[env:esp32-cyd-st7789]
 platform = espressif32
 framework = arduino
 board = esp32dev
 
-; LittleFS filesystem
 board_build.filesystem = littlefs
-
-; "default" partition gives exactly 1.5 MB to LittleFS — meets the minimum
+; "default.csv" gives exactly 1.5 MB to LittleFS — meets the minimum
 ; Switch to "no_ota" for 2 MB if you add extra assets
-board_build.partitions = default
+board_build.partitions = default.csv
 
 monitor_speed = 250000
 
 lib_deps =
     bodmer/TFT_eSPI @ ^2.4.3
-    bodmer/OpenWeather
+    https://github.com/Bodmer/OpenWeather    ; GitHub only — not in PlatformIO registry
     https://github.com/Bodmer/JSON_Decoder   ; GitHub only — do not use registry version
     bodmer/TJpg_Decoder @ ^1.1.0
     JChristensen/Timezone @ ^1.2.4
@@ -212,4 +210,4 @@ espressif32 platform (arduino-esp32 boards 3.2.0)  https://github.com/espressif/
 
 ## Credits
 
-Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Further adapted for the CYD platform and extended with moon phase display, 4th forecast day, barometric pressure, cloud cover, and humidity by AndroidCrypto.
+Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Further adapted for the CYD platform and extended with moon phase display, barometric pressure, cloud cover, humidity, and next-3-hour forecast strip by AndroidCrypto.

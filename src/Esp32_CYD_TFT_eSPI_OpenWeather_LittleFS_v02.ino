@@ -136,7 +136,7 @@ void printWeather(void);
 int leftOffset(String text, String sub);
 int rightOffset(String text, String sub);
 int splitIndex(String text);
-int getNextDayIndex(void);
+int getNextSlotIndex(void);
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   // Stop further decoding as image is running off bottom of screen
@@ -463,17 +463,13 @@ void drawCurrentWeather() {
 /***************************************************************************************
 **                          Draw the 4 forecast columns
 ***************************************************************************************/
-// draws the three forecast columns
+// draws the four forecast columns (next four 3-hour slots from now)
 void drawForecast() {
-  int8_t dayIndex = getNextDayIndex();
-
-  drawForecastDetail(8, 171, dayIndex);
-  dayIndex += 8;
-  drawForecastDetail(66, 171, dayIndex);  // was 95
-  dayIndex += 8;
-  drawForecastDetail(124, 171, dayIndex);  // was 180
-  dayIndex += 8;
-  drawForecastDetail(182, 171, dayIndex);  // was 180
+  int8_t slotIndex = getNextSlotIndex();
+  drawForecastDetail(8,   171, slotIndex);
+  drawForecastDetail(66,  171, slotIndex + 1);
+  drawForecastDetail(124, 171, slotIndex + 2);
+  drawForecastDetail(182, 171, slotIndex + 3);
   drawSeparator(171 + 69);
 }
 
@@ -481,39 +477,24 @@ void drawForecast() {
 **                          Draw 1 forecast column at x, y
 ***************************************************************************************/
 // helper for the forecast columns
-void drawForecastDetail(uint16_t x, uint16_t y, uint8_t dayIndex) {
-
-  if (dayIndex >= MAX_DAYS * 8) return;
-
-  String day = shortDOW[weekday(TIMEZONE.toLocal(forecast->dt[dayIndex + 4], &tz1_Code))];
-  day.toUpperCase();
+void drawForecastDetail(uint16_t x, uint16_t y, uint8_t slotIndex) {
+  if (slotIndex >= MAX_DAYS * 8) return;
 
   tft.setTextDatum(BC_DATUM);
-
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("WWW"));
-  tft.drawString(day, x + 25, y);
+  tft.setTextPadding(tft.textWidth("00:00"));
+  tft.drawString(strTime(forecast->dt[slotIndex]), x + 25, y);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth("-88   -88"));
-
-  // Find the temperature min and max during the day
-  float tmax = -9999;
-  float tmin = 9999;
-  for (int i = 0; i < 8; i++)
-    if (forecast->temp_max[dayIndex + i] > tmax) tmax = forecast->temp_max[dayIndex + i];
-  for (int i = 0; i < 8; i++)
-    if (forecast->temp_min[dayIndex + i] < tmin) tmin = forecast->temp_min[dayIndex + i];
-
-  String highTemp = String(tmax, 0);
-  String lowTemp = String(tmin, 0);
+  String highTemp = String(forecast->temp_max[slotIndex], 0);
+  String lowTemp  = String(forecast->temp_min[slotIndex], 0);
   tft.drawString(highTemp + " " + lowTemp, x + 25, y + 17);
 
-  String weatherIcon = getMeteoconIcon(forecast->id[dayIndex + 4], false);
-
+  String weatherIcon = getMeteoconIcon(forecast->id[slotIndex], false);
   ui.drawBmp("/icon50/" + weatherIcon + ".bmp", x, y + 18);
 
-  tft.setTextPadding(0);  // Reset padding width to none
+  tft.setTextPadding(0);
 }
 
 /***************************************************************************************
@@ -691,13 +672,12 @@ void fillSegment(int x, int y, int start_angle, int sub_angle, int r, unsigned i
 /***************************************************************************************
 **                          Get 3 hourly index at start of next day
 ***************************************************************************************/
-int getNextDayIndex(void) {
-  int index = 0;
-  String today = forecast->dt_txt[0].substring(8, 10);
-  for (index = 0; index < 9; index++) {
-    if (forecast->dt_txt[index].substring(8, 10) != today) break;
+int getNextSlotIndex(void) {
+  time_t t = now();
+  for (int i = 0; i < MAX_DAYS * 8; i++) {
+    if (forecast->dt[i] > t) return i;
   }
-  return index;
+  return 0;
 }
 
 /***************************************************************************************
