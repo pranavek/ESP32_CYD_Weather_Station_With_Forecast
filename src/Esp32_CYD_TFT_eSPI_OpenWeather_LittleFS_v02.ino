@@ -63,6 +63,8 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 
 #include <FS.h>
 #include <LittleFS.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 #define AA_FONT_SMALL "fonts/NSBold15"  // 15 point Noto sans serif bold
 #define AA_FONT_LARGE "fonts/NSBold36"  // 36 point Noto sans serif bold
@@ -119,6 +121,43 @@ GfxUi ui = GfxUi(&tft);  // Jpeg and bmpDraw functions
 
 long lastDownloadUpdate = millis();
 
+// ─── Cached forecast data — populated each updateData(), used by all page draws ───
+// (forecast pointer is deleted after fetch; pages need data without it.)
+struct SlotCache {
+  time_t   dt;
+  float    temp;
+  uint16_t id;
+  float    pop;
+};
+struct DayCache {
+  uint8_t  dow;       // 1..7 (Sun..Sat)
+  float    high;
+  float    low;
+  uint16_t id;        // representative id (mid-day slot)
+  float    pop;       // max pop across the day
+};
+
+SlotCache slotCache[4];
+DayCache  dayCache[4];
+time_t    cachedSunrise = 0;
+time_t    cachedSunset  = 0;
+uint8_t   cachedHumidity = 0;
+uint8_t   cachedClouds = 0;
+float     cachedWindGust = 0.0f;
+float     cachedVisibility = 0.0f;
+float     cachedDewPoint = 0.0f;
+uint8_t   cachedMoonIcon = 0;
+uint8_t   cachedMoonPhaseIdx = 0;
+bool      cacheValid = false;
+
+// New API data
+uint8_t   airQualityIndex = 0;     // 1–5 (OWM scale); 0 = unknown
+float     uvIndex = -1.0f;         // -1 = unknown
+char      nwsAlert[40] = "";       // empty = no active alert
+
+// Carousel state
+uint8_t   currentPage = 0;
+
 /***************************************************************************************
 **                          Declare prototypes
 ***************************************************************************************/
@@ -139,6 +178,18 @@ int leftOffset(String text, String sub);
 int rightOffset(String text, String sub);
 int splitIndex(String text);
 int getNextSlotIndex(void);
+void cacheForecastData(void);
+uint8_t moon_phase(int year, int month, int day, double hour, int* ip);
+void fetchAirQuality(void);
+void fetchUVIndex(void);
+void fetchNWSAlerts(void);
+void drawBottomSections(void);
+void drawPageIndicator(void);
+void drawHumanComfortStrip(void);
+void drawHumanComfortDetails(void);
+void drawDailyForecast(void);
+void drawRainProbability(void);
+void setBacklight(uint8_t level);
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   // Stop further decoding as image is running off bottom of screen
@@ -162,6 +213,11 @@ void setup() {
   tft.begin();
   tft.setRotation(2);  // 180° portrait
   tft.fillScreen(TFT_BLACK);
+
+  // PWM backlight on TFT_BL — controls brightness via SCREEN_BRIGHTNESS
+  ledcSetup(0, 5000, 8);          // channel 0, 5 kHz, 8-bit
+  ledcAttachPin(TFT_BL, 0);
+  setBacklight(SCREEN_BRIGHTNESS);
 
   if (!LittleFS.begin()) {
     Serial.println("Flash FS initialisation failed!");
@@ -243,7 +299,7 @@ void loop() {
   bool nightMode = !booted &&
                    ((h < NIGHT_ON_HOUR) || (h == NIGHT_OFF_HOUR && m >= 59));
 
-  digitalWrite(TFT_BL, nightMode ? LOW : HIGH);
+  setBacklight(nightMode ? 0 : SCREEN_BRIGHTNESS);
 
   // Weather update — timer not advanced during night so wake-up fetch is immediate
   if (booted || (millis() - lastDownloadUpdate > 1000UL * UPDATE_INTERVAL_SECS)) {
@@ -315,10 +371,13 @@ void updateData() {
   }
 
   if (parsed) {
+    cacheForecastData();    // snapshot needed values before forecast is deleted
+
     tft.loadFont(AA_FONT_SMALL, LittleFS);
     drawCurrentWeather();
-    drawForecast();
-    drawAstronomy();
+    tft.fillRect(0, 154, 240, 166, TFT_BLACK);  // clear bottom region for fresh page
+    drawBottomSections();
+    drawPageIndicator();
     tft.unloadFont();
 
     // Update the temperature here so we don't need to keep
@@ -340,6 +399,16 @@ void updateData() {
 
   // Delete to free up space
   delete forecast;
+  forecast = nullptr;
+
+  // Fetch supplementary data (after forecast is freed to keep peak heap low)
+  if (parsed) {
+    fetchAirQuality();
+    fetchUVIndex();
+#ifdef NWS_ALERTS
+    fetchNWSAlerts();
+#endif
+  }
 }
 
 /***************************************************************************************
@@ -398,6 +467,16 @@ void drawTime() {
   tft.setTextPadding(0);
 
   tft.unloadFont();
+
+  // Cycle the bottom-two-sections carousel every minute
+  if (cacheValid) {
+    currentPage = (currentPage + 1) % PAGE_COUNT;
+    tft.loadFont(AA_FONT_SMALL, LittleFS);
+    tft.fillRect(0, 154, 240, 166, TFT_BLACK);
+    drawBottomSections();
+    drawPageIndicator();
+    tft.unloadFont();
+  }
 }
 
 /***************************************************************************************
@@ -482,35 +561,34 @@ void drawCurrentWeather() {
 /***************************************************************************************
 **                          Draw the 4 forecast columns
 ***************************************************************************************/
-// draws the four forecast columns (next four 3-hour slots from now)
+// draws the four forecast columns (next four 3-hour slots from now) using cached data
 void drawForecast() {
-  int8_t slotIndex = getNextSlotIndex();
-  drawForecastDetail(8,   171, slotIndex);
-  drawForecastDetail(66,  171, slotIndex + 1);
-  drawForecastDetail(124, 171, slotIndex + 2);
-  drawForecastDetail(182, 171, slotIndex + 3);
+  drawForecastDetail(8,   171, 0);
+  drawForecastDetail(66,  171, 1);
+  drawForecastDetail(124, 171, 2);
+  drawForecastDetail(182, 171, 3);
   drawSeparator(171 + 69);
 }
 
 /***************************************************************************************
 **                          Draw 1 forecast column at x, y
 ***************************************************************************************/
-// helper for the forecast columns
+// helper for the forecast columns — uses cached slot data so it works during page cycling
 void drawForecastDetail(uint16_t x, uint16_t y, uint8_t slotIndex) {
-  if (slotIndex >= MAX_DAYS * 8) return;
+  if (slotIndex >= 4) return;
+  SlotCache& s = slotCache[slotIndex];
+  if (s.dt == 0) return;
 
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth("00:00"));
-  tft.drawString(strTime(forecast->dt[slotIndex]), x + 25, y);
+  tft.drawString(strTime(s.dt), x + 25, y);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("-88   -88"));
-  String highTemp = String(forecast->temp_max[slotIndex], 0);
-  String lowTemp  = String(forecast->temp_min[slotIndex], 0);
-  tft.drawString(highTemp + " " + lowTemp, x + 25, y + 17);
+  tft.setTextPadding(tft.textWidth(" -88o "));
+  tft.drawString(String(s.temp, 0) + "o", x + 25, y + 17);
 
-  String weatherIcon = getMeteoconIcon(forecast->id[slotIndex], false);
+  String weatherIcon = getMeteoconIcon(s.id, false);
   ui.drawBmp("/icon50/" + weatherIcon + ".bmp", x, y + 18);
 
   tft.setTextPadding(0);
@@ -520,66 +598,49 @@ void drawForecastDetail(uint16_t x, uint16_t y, uint8_t slotIndex) {
 **                          Draw Sun rise/set, Moon, cloud cover and humidity
 ***************************************************************************************/
 void drawAstronomy() {
-
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth(" Last qtr "));
 
-  time_t local_time = TIMEZONE.toLocal(forecast->dt[0], &tz1_Code);
-  uint16_t y = year(local_time);
-  uint8_t m = month(local_time);
-  uint8_t d = day(local_time);
-  uint8_t h = hour(local_time);
-  int ip;
-  uint8_t icon = moon_phase(y, m, d, h, &ip);
-
-  tft.drawString(moonPhase[ip], 120, 319);
-  ui.drawBmp("/moon/moonphase_L" + String(icon) + ".bmp", 120 - 30, 318 - 16 - 60);
+  tft.drawString(moonPhase[cachedMoonPhaseIdx], 120, 319);
+  ui.drawBmp("/moon/moonphase_L" + String(cachedMoonIcon) + ".bmp", 120 - 30, 318 - 16 - 60);
 
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(0);  // Reset padding width to none
+  tft.setTextPadding(0);
   tft.drawString(sunStr, 40, 270);
 
   tft.setTextDatum(BR_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth(" 88:88 "));
 
-  String rising = strTime(forecast->sunrise) + " ";
-  int dt = rightOffset(rising, ":");  // Draw relative to colon to them aligned
+  String rising = strTime(cachedSunrise) + " ";
+  int dt = rightOffset(rising, ":");
   tft.drawString(rising, 40 + dt, 290);
 
-  String setting = strTime(forecast->sunset) + " ";
+  String setting = strTime(cachedSunset) + " ";
   dt = rightOffset(setting, ":");
   tft.drawString(setting, 40 + dt, 305);
 
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.drawString(cloudStr, 195, 260);  // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< ?
-
-  String cloudCover = "";
-  cloudCover += forecast->clouds_all[0];
-  cloudCover += "%";
+  tft.drawString(cloudStr, 195, 260);
 
   tft.setTextDatum(BR_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth(" 100%"));
-  tft.drawString(cloudCover, 210, 277);
+  tft.drawString(String(cachedClouds) + "%", 210, 277);
 
   tft.setTextDatum(BC_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.drawString(humidityStr, 195, 300 - 2);  // <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< ?
-
-  String humidity = "";
-  humidity += forecast->humidity[0];
-  humidity += "%";
+  tft.drawString(humidityStr, 195, 300 - 2);
 
   tft.setTextDatum(BR_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextPadding(tft.textWidth("100%"));
-  tft.drawString(humidity, 210, 315);
+  tft.drawString(String(cachedHumidity) + "%", 210, 315);
 
-  tft.setTextPadding(0);  // Reset padding width to none
+  tft.setTextPadding(0);
 }
 
 /***************************************************************************************
@@ -587,7 +648,7 @@ void drawAstronomy() {
 ***************************************************************************************/
 const char* getMeteoconIcon(uint16_t id, bool today) {
   // if ( today && id/100 == 8 && (forecast->dt[0] < forecast->sunrise || forecast->dt[0] > forecast->sunset)) id += 1000;
-  if (today && id / 100 == 8 && (now() < forecast->sunrise || now() > forecast->sunset)) id += 1000;
+  if (today && id / 100 == 8 && cachedSunrise > 0 && (now() < cachedSunrise || now() > cachedSunset)) id += 1000;
   // see issue https://github.com/Bodmer/OpenWeather/issues/26
   if (id / 100 == 2) return "thunderstorm";
   if (id / 100 == 3) return "drizzle";
@@ -697,6 +758,447 @@ int getNextSlotIndex(void) {
     if (forecast->dt[i] > t) return i;
   }
   return 0;
+}
+
+/***************************************************************************************
+**                          Backlight PWM helper
+***************************************************************************************/
+void setBacklight(uint8_t level) {
+  ledcWrite(0, level);  // channel 0 (attached to TFT_BL in setup)
+}
+
+/***************************************************************************************
+**                          Cache forecast data before forecast pointer is freed
+***************************************************************************************/
+void cacheForecastData(void) {
+  // Slot cache: next 4 three-hour slots
+  int start = getNextSlotIndex();
+  for (int i = 0; i < 4; i++) {
+    int idx = start + i;
+    if (idx < MAX_DAYS * 8) {
+      slotCache[i].dt   = forecast->dt[idx];
+      slotCache[i].temp = forecast->temp[idx];
+      slotCache[i].id   = forecast->id[idx];
+      slotCache[i].pop  = forecast->pop[idx];
+    } else {
+      slotCache[i].dt = 0;
+    }
+  }
+
+  // Day cache: aggregate by calendar day, skip today, take next 4 days
+  for (int d = 0; d < 4; d++) {
+    dayCache[d].dow = 0;
+    dayCache[d].high = -1000.0f;
+    dayCache[d].low  =  1000.0f;
+    dayCache[d].id   = 0;
+    dayCache[d].pop  = 0.0f;
+  }
+  time_t nowLocal = TIMEZONE.toLocal(now(), &tz1_Code);
+  int todayDay = day(nowLocal);
+  int filled = 0;
+  int lastDayKey = todayDay;
+  int dayBestSlotIdx = -1;
+  uint8_t dayBestHourDist = 24;
+  for (int i = 0; i < MAX_DAYS * 8 && filled < 4; i++) {
+    time_t local = TIMEZONE.toLocal(forecast->dt[i], &tz1_Code);
+    int dKey = day(local);
+    if (dKey == todayDay) continue;
+    if (filled == 0 || dKey != lastDayKey) {
+      // commit previous day's representative id from best slot
+      if (filled > 0 && dayBestSlotIdx >= 0) {
+        dayCache[filled - 1].id = forecast->id[dayBestSlotIdx];
+      }
+      if (filled >= 4) break;
+      lastDayKey = dKey;
+      dayCache[filled].dow = weekday(local);  // 1..7
+      dayBestSlotIdx = i;
+      dayBestHourDist = abs((int)hour(local) - 13);
+      filled++;
+    } else {
+      uint8_t hd = abs((int)hour(local) - 13);
+      if (hd < dayBestHourDist) {
+        dayBestHourDist = hd;
+        dayBestSlotIdx = i;
+      }
+    }
+    DayCache& dc = dayCache[filled - 1];
+    if (forecast->temp_max[i] > dc.high) dc.high = forecast->temp_max[i];
+    if (forecast->temp_min[i] < dc.low)  dc.low  = forecast->temp_min[i];
+    if (forecast->pop[i]      > dc.pop)  dc.pop  = forecast->pop[i];
+  }
+  // commit last day's icon id
+  if (filled > 0 && dayBestSlotIdx >= 0) {
+    dayCache[filled - 1].id = forecast->id[dayBestSlotIdx];
+  }
+
+  // Singleton fields
+  cachedSunrise    = forecast->sunrise;
+  cachedSunset     = forecast->sunset;
+  cachedHumidity   = forecast->humidity[0];
+  cachedClouds     = forecast->clouds_all[0];
+  cachedWindGust   = forecast->wind_gust[0];
+  cachedVisibility = forecast->visibility[0];
+
+  // Magnus-Tetens dew-point approximation (close enough for display)
+  float T = forecast->temp[0];
+  float RH = forecast->humidity[0];
+  // Convert if imperial: API returns °F under "imperial"; display in same unit
+  cachedDewPoint = T - ((100.0f - RH) / 5.0f);
+
+  // Moon
+  time_t local0 = TIMEZONE.toLocal(forecast->dt[0], &tz1_Code);
+  int ip;
+  cachedMoonIcon     = moon_phase(year(local0), month(local0), day(local0), hour(local0), &ip);
+  cachedMoonPhaseIdx = ip;
+
+  cacheValid = true;
+}
+
+/***************************************************************************************
+**                          Tiny JSON value extractor (no external dep)
+***************************************************************************************/
+// Return integer value following the first occurrence of `keyPattern` in `body`.
+// keyPattern should include the quotes, e.g. "\"aqi\":"
+static int extractIntAfter(const String& body, const char* keyPattern, int dflt) {
+  int p = body.indexOf(keyPattern);
+  if (p < 0) return dflt;
+  p += strlen(keyPattern);
+  while (p < (int)body.length() && (body[p] == ' ' || body[p] == ':')) p++;
+  int sign = 1;
+  if (p < (int)body.length() && body[p] == '-') { sign = -1; p++; }
+  int val = 0;
+  bool any = false;
+  while (p < (int)body.length() && body[p] >= '0' && body[p] <= '9') {
+    val = val * 10 + (body[p] - '0');
+    p++;
+    any = true;
+  }
+  return any ? sign * val : dflt;
+}
+
+static float extractFloatAfter(const String& body, const char* keyPattern, float dflt) {
+  int p = body.indexOf(keyPattern);
+  if (p < 0) return dflt;
+  p += strlen(keyPattern);
+  while (p < (int)body.length() && (body[p] == ' ' || body[p] == ':' || body[p] == '[')) p++;
+  int end = p;
+  while (end < (int)body.length() && (isdigit(body[end]) || body[end] == '-' || body[end] == '.' || body[end] == 'e' || body[end] == 'E' || body[end] == '+')) end++;
+  if (end == p) return dflt;
+  return body.substring(p, end).toFloat();
+}
+
+static String extractStringAfter(const String& body, const char* keyPattern) {
+  int p = body.indexOf(keyPattern);
+  if (p < 0) return "";
+  p += strlen(keyPattern);
+  while (p < (int)body.length() && (body[p] == ' ' || body[p] == ':')) p++;
+  if (p >= (int)body.length() || body[p] != '"') return "";
+  p++;
+  int end = body.indexOf('"', p);
+  if (end < 0) return "";
+  return body.substring(p, end);
+}
+
+/***************************************************************************************
+**                          Fetch OWM Air Pollution (free, same key)
+***************************************************************************************/
+void fetchAirQuality(void) {
+  WiFiClient client;
+  HTTPClient http;
+  String url = "http://api.openweathermap.org/data/2.5/air_pollution?lat=" + latitude +
+               "&lon=" + longitude + "&appid=" + api_key;
+  http.setTimeout(5000);
+  if (!http.begin(client, url)) { Serial.println("AQ: begin failed"); return; }
+  int code = http.GET();
+  if (code == 200) {
+    String body = http.getString();
+    int aqi = extractIntAfter(body, "\"aqi\":", 0);
+    if (aqi >= 1 && aqi <= 5) airQualityIndex = (uint8_t)aqi;
+    Serial.print("AQI: "); Serial.println(airQualityIndex);
+  } else {
+    Serial.print("AQ HTTP: "); Serial.println(code);
+  }
+  http.end();
+}
+
+/***************************************************************************************
+**                          Fetch UV index from Open-Meteo (free, no key)
+***************************************************************************************/
+void fetchUVIndex(void) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = "https://api.open-meteo.com/v1/forecast?latitude=" + latitude +
+               "&longitude=" + longitude + "&hourly=uv_index&forecast_days=1&timezone=auto";
+  http.setTimeout(5000);
+  if (!http.begin(client, url)) { Serial.println("UV: begin failed"); return; }
+  int code = http.GET();
+  if (code == 200) {
+    String body = http.getString();
+    // Take the value at the current hour index from the hourly array
+    int arrStart = body.indexOf("\"uv_index\":[");
+    if (arrStart >= 0) {
+      arrStart += strlen("\"uv_index\":[");
+      // Get current local hour (Open-Meteo returns 24 hourly values starting at 00:00 local)
+      time_t local_t = TIMEZONE.toLocal(now(), &tz1_Code);
+      int h = hour(local_t);
+      int p = arrStart;
+      for (int i = 0; i < h; i++) {
+        int comma = body.indexOf(',', p);
+        if (comma < 0) { p = -1; break; }
+        p = comma + 1;
+      }
+      if (p > 0 && p < (int)body.length()) {
+        int end = p;
+        while (end < (int)body.length() && (isdigit(body[end]) || body[end] == '.' || body[end] == '-')) end++;
+        uvIndex = body.substring(p, end).toFloat();
+      }
+    }
+    Serial.print("UV: "); Serial.println(uvIndex);
+  } else {
+    Serial.print("UV HTTP: "); Serial.println(code);
+  }
+  http.end();
+}
+
+/***************************************************************************************
+**                          Fetch NWS active alerts (US only)
+***************************************************************************************/
+void fetchNWSAlerts(void) {
+  nwsAlert[0] = '\0';
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = "https://api.weather.gov/alerts/active?point=" + latitude + "," + longitude;
+  http.setTimeout(5000);
+  if (!http.begin(client, url)) { Serial.println("NWS: begin failed"); return; }
+  http.addHeader("User-Agent", "ESP32WeatherDisplay/1.0");
+  http.addHeader("Accept", "application/geo+json");
+  int code = http.GET();
+  if (code == 200) {
+    String body = http.getString();
+    String evt = extractStringAfter(body, "\"event\":");
+    if (evt.length() > 0) {
+      strncpy(nwsAlert, evt.c_str(), sizeof(nwsAlert) - 1);
+      nwsAlert[sizeof(nwsAlert) - 1] = '\0';
+    }
+    Serial.print("NWS: "); Serial.println(nwsAlert);
+  } else {
+    Serial.print("NWS HTTP: "); Serial.println(code);
+  }
+  http.end();
+}
+
+/***************************************************************************************
+**                          Page dispatcher
+***************************************************************************************/
+void drawBottomSections(void) {
+  if (!cacheValid) return;
+  switch (currentPage) {
+    case 0:  // Hourly + Astronomy (existing)
+      drawForecast();
+      drawAstronomy();
+      break;
+    case 1:  // Human Comfort
+      drawHumanComfortStrip();
+      drawSeparator(240);
+      drawHumanComfortDetails();
+      break;
+    case 2:  // 4-day forecast + rain probability
+      drawDailyForecast();
+      drawSeparator(240);
+      drawRainProbability();
+      break;
+  }
+}
+
+/***************************************************************************************
+**                          Page indicator dots (just above Y=153)
+***************************************************************************************/
+void drawPageIndicator(void) {
+  const int y = 150;
+  const int spacing = 14;
+  const int dotR = 2;
+  int xStart = 120 - ((PAGE_COUNT - 1) * spacing) / 2;
+  for (int i = 0; i < PAGE_COUNT; i++) {
+    uint16_t color = (i == currentPage) ? TFT_WHITE : 0x4228;
+    tft.fillCircle(xStart + i * spacing, y, dotR, color);
+  }
+}
+
+/***************************************************************************************
+**                          Page 2 — Human Comfort: UV + AQI
+***************************************************************************************/
+static const char* aqiLabel(uint8_t v) {
+  switch (v) {
+    case 1: return "Good";
+    case 2: return "Fair";
+    case 3: return "Moderate";
+    case 4: return "Poor";
+    case 5: return "Very Poor";
+    default: return "--";
+  }
+}
+static const char* aqiAdvice(uint8_t v) {
+  switch (v) {
+    case 1: return "Go outside freely";
+    case 2: return "Sensitive: take care";
+    case 3: return "Limit outdoor cardio";
+    case 4: return "Avoid outdoor exertion";
+    case 5: return "Stay indoors";
+    default: return "Air data unavailable";
+  }
+}
+static const char* uvCategory(float uv) {
+  if (uv < 0)    return "--";
+  if (uv < 3.0f) return "Low";
+  if (uv < 6.0f) return "Moderate";
+  if (uv < 8.0f) return "High";
+  if (uv < 11.0f)return "Very High";
+  return "Extreme";
+}
+
+void drawHumanComfortStrip(void) {
+  // UV row at Y=170
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.setTextPadding(0);
+  tft.drawString("UV", 12, 162);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  String uvStr = (uvIndex < 0) ? String("--") : String(uvIndex, 1);
+  tft.drawString(uvStr, 38, 162);
+
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString(uvCategory(uvIndex), 228, 162);
+
+  // UV bar
+  int barX = 12, barY = 184, barW = 216, barH = 6;
+  tft.drawRect(barX, barY, barW, barH, 0x4228);
+  if (uvIndex > 0) {
+    int filled = (int)((uvIndex / 11.0f) * (barW - 2));
+    if (filled > barW - 2) filled = barW - 2;
+    uint16_t c = TFT_GREEN;
+    if (uvIndex >= 3) c = TFT_YELLOW;
+    if (uvIndex >= 6) c = TFT_ORANGE;
+    if (uvIndex >= 8) c = TFT_RED;
+    if (uvIndex >= 11) c = TFT_MAGENTA;
+    tft.fillRect(barX + 1, barY + 1, filled, barH - 2, c);
+  }
+
+  // Burn-time line
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  String burn;
+  if (uvIndex <= 0) burn = "Burn risk: --";
+  else if (uvIndex >= 11) burn = "Burn <15 min";
+  else {
+    int mins = (int)(200.0f / uvIndex);
+    burn = "Burn ~" + String(mins) + " min";
+  }
+  tft.drawString(burn, 12, 196);
+
+  // AQI line at Y=216
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString("AQI", 12, 216);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  String aqiTxt = (airQualityIndex == 0) ? String("--") : (String(airQualityIndex) + " " + aqiLabel(airQualityIndex));
+  tft.drawString(aqiTxt, 44, 216);
+
+  // Advice
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString(aqiAdvice(airQualityIndex), 12, 230);
+}
+
+void drawHumanComfortDetails(void) {
+  // Three-column row at Y=250
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.setTextPadding(0);
+  tft.drawString("Gust",   45, 250);
+  tft.drawString("Visibility", 120, 250);
+  tft.drawString("Dew",   195, 250);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  String gust = String(cachedWindGust, 0) + (units == "metric" ? " m/s" : " mph");
+  tft.drawString(gust, 45, 268);
+
+  // visibility — API returns metres; show km if >= 1000
+  String vis;
+  if (cachedVisibility >= 1000.0f) vis = String(cachedVisibility / 1000.0f, 1) + " km";
+  else                              vis = String(cachedVisibility, 0) + " m";
+  tft.drawString(vis, 120, 268);
+
+  String dew = String(cachedDewPoint, 0) + (units == "metric" ? "oC" : "oF");
+  tft.drawString(dew, 195, 268);
+
+  // Alert banner — red if present, else blank
+  tft.setTextDatum(TC_DATUM);
+  if (nwsAlert[0] != '\0') {
+    tft.fillRect(0, 295, 240, 20, TFT_RED);
+    tft.setTextColor(TFT_WHITE, TFT_RED);
+    tft.setTextPadding(240);
+    tft.drawString(String("! ") + nwsAlert, 120, 297);
+    tft.setTextPadding(0);
+  }
+}
+
+/***************************************************************************************
+**                          Page 3 — 4-day forecast + rain probability
+***************************************************************************************/
+static const char* dowAbbrev(uint8_t dow) {
+  // weekday() returns 1=Sun..7=Sat
+  static const char* names[8] = { "?", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+  if (dow < 1 || dow > 7) return "?";
+  return names[dow];
+}
+
+void drawDailyForecast(void) {
+  // 4 columns at x = 8, 66, 124, 182 — same layout as 3-hour strip
+  for (int i = 0; i < 4; i++) {
+    DayCache& d = dayCache[i];
+    int x = 8 + i * 58;
+    int y = 171;
+    if (d.dow == 0) continue;
+
+    tft.setTextDatum(BC_DATUM);
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    tft.setTextPadding(tft.textWidth("Wed"));
+    tft.drawString(dowAbbrev(d.dow), x + 25, y);
+
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextPadding(tft.textWidth("-88/-88"));
+    tft.drawString(String(d.high, 0) + "/" + String(d.low, 0), x + 25, y + 17);
+
+    String icon = getMeteoconIcon(d.id, false);
+    ui.drawBmp("/icon50/" + icon + ".bmp", x, y + 18);
+  }
+  tft.setTextPadding(0);
+}
+
+void drawRainProbability(void) {
+  // 4-column row matching the days above. Y=250 day label, Y=270 percent.
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.setTextPadding(0);
+  tft.drawString("Rain chance", 120, 250);
+
+  for (int i = 0; i < 4; i++) {
+    DayCache& d = dayCache[i];
+    int x = 8 + i * 58 + 25;  // column centre (matches forecast strip)
+    if (d.dow == 0) continue;
+    int pct = (int)(d.pop * 100.0f + 0.5f);
+    if (pct > 100) pct = 100;
+    uint16_t color = TFT_LIGHTGREY;
+    if (pct >= 70)      color = TFT_CYAN;
+    else if (pct >= 40) color = TFT_YELLOW;
+    else if (pct >= 15) color = TFT_WHITE;
+    tft.setTextColor(color, TFT_BLACK);
+    tft.drawString(String(pct) + "%", x, 275);
+  }
+  tft.setTextPadding(0);
 }
 
 /***************************************************************************************

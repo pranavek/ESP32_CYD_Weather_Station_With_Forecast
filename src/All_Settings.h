@@ -31,6 +31,15 @@ const int UPDATE_INTERVAL_SECS = 30UL * 60UL;  // 30 minutes
 #define NIGHT_OFF_HOUR  23
 #define NIGHT_ON_HOUR    6
 
+// Screen brightness 0–255 (PWM duty on TFT_BL pin). 255 = max, 0 = off.
+#define SCREEN_BRIGHTNESS 200
+
+// Number of carousel pages for the bottom two sections (cycles every minute)
+#define PAGE_COUNT 3
+
+// Uncomment to enable NWS weather alerts (US locations only — uses api.weather.gov)
+//#define NWS_ALERTS
+
 // Pins for the TFT interface are defined in the User_Config.h file inside the TFT_eSPI library
 
 // For units use "metric" or "imperial"
