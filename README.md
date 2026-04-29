@@ -5,11 +5,10 @@ Companion repository for the article [Create an Internet Weather Station with 3 
 
 ## Features
 
-- **Current conditions** — weather icon (100×100 px), description text, temperature (large font), wind speed + compass direction icon, barometric pressure
-- **Hourly forecast strip** — next four 3-hour slots from now (e.g. 15:00 / 18:00 / 21:00 / 00:00), high/low temperature and 50×50 px weather icon per slot
-- **Astronomy panel** — sunrise/sunset times, moon phase icon (24 phases) + phase name, cloud cover %, humidity %
+- **Current conditions** — weather icon (100×100 px), description text, feels-like temperature, temperature (large font), wind speed + compass direction icon, barometric pressure with trend arrow
 - **Live clock** — HH:MM updated every minute via NTP (timezone + DST aware); header shows current date as `Www  Mmm D  YYYY`
-- **Auto-refresh** — weather data fetched every 15 minutes (configurable); respects the free OpenWeatherMap tier of ~40 requests/hour
+- **2-page bottom carousel** — cycles every 15 seconds between Page 1 and Page 2
+- **Auto-refresh** — weather data fetched every 30 minutes (configurable); uses only the free OpenWeatherMap forecast endpoint
 
 ## Display Layout
 
@@ -19,15 +18,23 @@ Companion repository for the article [Create an Internet Weather Station with 3 
 │         14:32               │
 ├─────────────────────────────┤
 │  [icon]  Partly Cloudy  18° │  Current weather
-│          3 m/s  ↗  1013 hPa │
-├─────────────────────────────┤
-│15:00 18:00 21:00 00:00      │  Next 4 × 3-hour slots
-│ [i]  [i]  [i]  [i]          │
-│18 17 17 16 15 15 12 12      │
-├─────────────────────────────┤
-│ Sun  05:42        ☽  Waxing │  Astronomy
-│      20:11    Cloud  23%    │
-│               Humidity 61%  │
+│  feels 16°    ↗  1013 hPa  │
+│          3 m/s              │
+├─────────────────────────────┤  ← carousel (cycles every 15 s)
+│                             │
+│  Page 1 — Hourly + Astronomy│
+│  15:00 18:00 21:00 00:00    │  Next 4 × 3-hour slots (temp + icon)
+│  [i]   [i]   [i]   [i]     │
+│  Sun 05:42     ☽  Waxing    │  Astronomy
+│      20:11  Cloud 23%       │
+│             Humidity 61%    │
+│                             │
+│  Page 2 — Daily + Quote     │
+│  Mon  Tue  Wed  Thu         │  4-day forecast (icon + hi/lo temp)
+│  [i]  [i]  [i]  [i]        │
+│  ─────────────────────────  │
+│    "Fortune favors bold."   │  Random motivational quote
+│                             │
 └─────────────────────────────┘  ↓ (320 px)
 ```
 

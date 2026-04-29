@@ -63,8 +63,6 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 
 #include <FS.h>
 #include <LittleFS.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 
 #define AA_FONT_SMALL "fonts/NSBold15"  // 15 point Noto sans serif bold
 #define AA_FONT_LARGE "fonts/NSBold36"  // 36 point Noto sans serif bold
@@ -143,9 +141,6 @@ time_t    cachedSunrise = 0;
 time_t    cachedSunset  = 0;
 uint8_t   cachedHumidity = 0;
 uint8_t   cachedClouds = 0;
-float     cachedWindGust = 0.0f;
-float     cachedVisibility = 0.0f;
-float     cachedDewPoint = 0.0f;
 uint8_t   cachedMoonIcon = 0;
 uint8_t   cachedMoonPhaseIdx = 0;
 bool      cacheValid = false;
@@ -178,7 +173,7 @@ int getNextSlotIndex(void);
 void cacheForecastData(void);
 uint8_t moon_phase(int year, int month, int day, double hour, int* ip);
 void drawBottomSections(void);
-void drawHumanComfortDetails(void);
+void drawQuote(void);
 void drawDailyForecast(void);
 void setBacklight(uint8_t level);
 
@@ -819,15 +814,6 @@ void cacheForecastData(void) {
   cachedSunset     = forecast->sunset;
   cachedHumidity   = forecast->humidity[0];
   cachedClouds     = forecast->clouds_all[0];
-  cachedWindGust   = forecast->wind_gust[0];
-  cachedVisibility = forecast->visibility[0];
-
-  // Magnus-Tetens dew-point approximation (close enough for display)
-  float T = forecast->temp[0];
-  float RH = forecast->humidity[0];
-  // Convert if imperial: API returns °F under "imperial"; display in same unit
-  cachedDewPoint = T - ((100.0f - RH) / 5.0f);
-
   // Moon
   time_t local0 = TIMEZONE.toLocal(forecast->dt[0], &tz1_Code);
   int ip;
@@ -847,38 +833,57 @@ void drawBottomSections(void) {
       drawForecast();
       drawAstronomy();
       break;
-    case 1:  // 4-day forecast + gust/visibility/dew
+    case 1:  // 4-day forecast + random quote
       drawDailyForecast();
       drawSeparator(240);
-      drawHumanComfortDetails();
+      drawQuote();
       break;
   }
 }
 
 /***************************************************************************************
-**                          Page 2 — Human comfort details (gust / visibility / dew)
+**                          Page 2 — Random quote
 ***************************************************************************************/
-void drawHumanComfortDetails(void) {
-  // Three-column row at Y=250
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(0);
-  tft.drawString("Gust",   45, 250);
-  tft.drawString("Visibility", 120, 250);
-  tft.drawString("Dew",   195, 250);
-
+void drawQuote(void) {
+  static const char* quotes[] = {
+    "Be your own hero.",
+    "Growth requires change.",
+    "Progress over perfection.",
+    "Keep moving forward.",
+    "Trust the process.",
+    "Learn from everything.",
+    "Rise above it.",
+    "Own your story.",
+    "Make it happen.",
+    "Less talk, more action.",
+    "Dream big, act.",
+    "Fortune favors bold.",
+    "Seize the day.",
+    "Begin the work.",
+    "Success takes time.",
+    "Stay hungry, stay humble.",
+    "This too passes.",
+    "Simple is beautiful.",
+    "Choose kindness always.",
+    "Breathe and release.",
+    "Focus on good.",
+    "Live and let live.",
+    "Mind over matter.",
+    "Silence is powerful.",
+    "Integrity is everything.",
+    "Courage over comfort.",
+    "Stay true, stay you.",
+    "Lead with heart.",
+    "Grit defines you.",
+    "Strength in softness.",
+  };
+  const uint8_t QUOTE_COUNT = sizeof(quotes) / sizeof(quotes[0]);
+  uint8_t idx = (uint8_t)(esp_random() % QUOTE_COUNT);
+  tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  String gust = String(cachedWindGust, 0) + (units == "metric" ? " m/s" : " mph");
-  tft.drawString(gust, 45, 268);
-
-  // visibility — API returns metres; show km if >= 1000
-  String vis;
-  if (cachedVisibility >= 1000.0f) vis = String(cachedVisibility / 1000.0f, 1) + " km";
-  else                              vis = String(cachedVisibility, 0) + " m";
-  tft.drawString(vis, 120, 268);
-
-  String dew = String(cachedDewPoint, 0) + (units == "metric" ? "oC" : "oF");
-  tft.drawString(dew, 195, 268);
+  tft.setTextPadding(230);
+  tft.drawString(quotes[idx], 120, 280);
+  tft.setTextPadding(0);
 }
 
 /***************************************************************************************
