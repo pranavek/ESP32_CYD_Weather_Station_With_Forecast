@@ -150,10 +150,6 @@ uint8_t   cachedMoonIcon = 0;
 uint8_t   cachedMoonPhaseIdx = 0;
 bool      cacheValid = false;
 
-// New API data
-uint8_t   airQualityIndex = 0;     // 1–5 (OWM scale); 0 = unknown
-float     uvIndex = -1.0f;         // -1 = unknown
-char      nwsAlert[40] = "";       // empty = no active alert
 
 // Carousel state
 uint8_t        currentPage    = 0;
@@ -181,9 +177,6 @@ int splitIndex(String text);
 int getNextSlotIndex(void);
 void cacheForecastData(void);
 uint8_t moon_phase(int year, int month, int day, double hour, int* ip);
-void fetchAirQuality(void);
-void fetchUVIndex(void);
-void fetchNWSAlerts(void);
 void drawBottomSections(void);
 void drawHumanComfortDetails(void);
 void drawDailyForecast(void);
@@ -408,14 +401,6 @@ void updateData() {
   delete forecast;
   forecast = nullptr;
 
-  // Fetch supplementary data (after forecast is freed to keep peak heap low)
-  if (parsed) {
-    fetchAirQuality();
-    fetchUVIndex();
-#ifdef NWS_ALERTS
-    fetchNWSAlerts();
-#endif
-  }
 }
 
 /***************************************************************************************
@@ -853,141 +838,6 @@ void cacheForecastData(void) {
 }
 
 /***************************************************************************************
-**                          Tiny JSON value extractor (no external dep)
-***************************************************************************************/
-// Return integer value following the first occurrence of `keyPattern` in `body`.
-// keyPattern should include the quotes, e.g. "\"aqi\":"
-static int extractIntAfter(const String& body, const char* keyPattern, int dflt) {
-  int p = body.indexOf(keyPattern);
-  if (p < 0) return dflt;
-  p += strlen(keyPattern);
-  while (p < (int)body.length() && (body[p] == ' ' || body[p] == ':')) p++;
-  int sign = 1;
-  if (p < (int)body.length() && body[p] == '-') { sign = -1; p++; }
-  int val = 0;
-  bool any = false;
-  while (p < (int)body.length() && body[p] >= '0' && body[p] <= '9') {
-    val = val * 10 + (body[p] - '0');
-    p++;
-    any = true;
-  }
-  return any ? sign * val : dflt;
-}
-
-static float extractFloatAfter(const String& body, const char* keyPattern, float dflt) {
-  int p = body.indexOf(keyPattern);
-  if (p < 0) return dflt;
-  p += strlen(keyPattern);
-  while (p < (int)body.length() && (body[p] == ' ' || body[p] == ':' || body[p] == '[')) p++;
-  int end = p;
-  while (end < (int)body.length() && (isdigit(body[end]) || body[end] == '-' || body[end] == '.' || body[end] == 'e' || body[end] == 'E' || body[end] == '+')) end++;
-  if (end == p) return dflt;
-  return body.substring(p, end).toFloat();
-}
-
-static String extractStringAfter(const String& body, const char* keyPattern) {
-  int p = body.indexOf(keyPattern);
-  if (p < 0) return "";
-  p += strlen(keyPattern);
-  while (p < (int)body.length() && (body[p] == ' ' || body[p] == ':')) p++;
-  if (p >= (int)body.length() || body[p] != '"') return "";
-  p++;
-  int end = body.indexOf('"', p);
-  if (end < 0) return "";
-  return body.substring(p, end);
-}
-
-/***************************************************************************************
-**                          Fetch OWM Air Pollution (free, same key)
-***************************************************************************************/
-void fetchAirQuality(void) {
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://api.openweathermap.org/data/2.5/air_pollution?lat=" + latitude +
-               "&lon=" + longitude + "&appid=" + api_key;
-  http.setTimeout(5000);
-  if (!http.begin(client, url)) { Serial.println("AQ: begin failed"); return; }
-  int code = http.GET();
-  if (code == 200) {
-    String body = http.getString();
-    int aqi = extractIntAfter(body, "\"aqi\":", 0);
-    if (aqi >= 1 && aqi <= 5) airQualityIndex = (uint8_t)aqi;
-    Serial.print("AQI: "); Serial.println(airQualityIndex);
-  } else {
-    Serial.print("AQ HTTP: "); Serial.println(code);
-  }
-  http.end();
-}
-
-/***************************************************************************************
-**                          Fetch UV index from Open-Meteo (free, no key)
-***************************************************************************************/
-void fetchUVIndex(void) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  String url = "https://api.open-meteo.com/v1/forecast?latitude=" + latitude +
-               "&longitude=" + longitude + "&hourly=uv_index&forecast_days=1&timezone=auto";
-  http.setTimeout(5000);
-  if (!http.begin(client, url)) { Serial.println("UV: begin failed"); return; }
-  int code = http.GET();
-  if (code == 200) {
-    String body = http.getString();
-    // Take the value at the current hour index from the hourly array
-    int arrStart = body.indexOf("\"uv_index\":[");
-    if (arrStart >= 0) {
-      arrStart += strlen("\"uv_index\":[");
-      // Get current local hour (Open-Meteo returns 24 hourly values starting at 00:00 local)
-      time_t local_t = TIMEZONE.toLocal(now(), &tz1_Code);
-      int h = hour(local_t);
-      int p = arrStart;
-      for (int i = 0; i < h; i++) {
-        int comma = body.indexOf(',', p);
-        if (comma < 0) { p = -1; break; }
-        p = comma + 1;
-      }
-      if (p > 0 && p < (int)body.length()) {
-        int end = p;
-        while (end < (int)body.length() && (isdigit(body[end]) || body[end] == '.' || body[end] == '-')) end++;
-        uvIndex = body.substring(p, end).toFloat();
-      }
-    }
-    Serial.print("UV: "); Serial.println(uvIndex);
-  } else {
-    Serial.print("UV HTTP: "); Serial.println(code);
-  }
-  http.end();
-}
-
-/***************************************************************************************
-**                          Fetch NWS active alerts (US only)
-***************************************************************************************/
-void fetchNWSAlerts(void) {
-  nwsAlert[0] = '\0';
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  String url = "https://api.weather.gov/alerts/active?point=" + latitude + "," + longitude;
-  http.setTimeout(5000);
-  if (!http.begin(client, url)) { Serial.println("NWS: begin failed"); return; }
-  http.addHeader("User-Agent", "ESP32WeatherDisplay/1.0");
-  http.addHeader("Accept", "application/geo+json");
-  int code = http.GET();
-  if (code == 200) {
-    String body = http.getString();
-    String evt = extractStringAfter(body, "\"event\":");
-    if (evt.length() > 0) {
-      strncpy(nwsAlert, evt.c_str(), sizeof(nwsAlert) - 1);
-      nwsAlert[sizeof(nwsAlert) - 1] = '\0';
-    }
-    Serial.print("NWS: "); Serial.println(nwsAlert);
-  } else {
-    Serial.print("NWS HTTP: "); Serial.println(code);
-  }
-  http.end();
-}
-
-/***************************************************************************************
 **                          Page dispatcher
 ***************************************************************************************/
 void drawBottomSections(void) {
@@ -1029,16 +879,6 @@ void drawHumanComfortDetails(void) {
 
   String dew = String(cachedDewPoint, 0) + (units == "metric" ? "oC" : "oF");
   tft.drawString(dew, 195, 268);
-
-  // Alert banner — red if present, else blank
-  tft.setTextDatum(TC_DATUM);
-  if (nwsAlert[0] != '\0') {
-    tft.fillRect(0, 295, 240, 20, TFT_RED);
-    tft.setTextColor(TFT_WHITE, TFT_RED);
-    tft.setTextPadding(240);
-    tft.drawString(String("! ") + nwsAlert, 120, 297);
-    tft.setTextPadding(0);
-  }
 }
 
 /***************************************************************************************

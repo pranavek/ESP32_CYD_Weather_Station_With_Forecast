@@ -37,9 +37,6 @@ const int UPDATE_INTERVAL_SECS = 30UL * 60UL;  // 30 minutes
 // Number of carousel pages for the bottom two sections
 #define PAGE_COUNT 2
 
-// Uncomment to enable NWS weather alerts (US locations only — uses api.weather.gov)
-//#define NWS_ALERTS
-
 // Pins for the TFT interface are defined in the User_Config.h file inside the TFT_eSPI library
 
 // For units use "metric" or "imperial"
