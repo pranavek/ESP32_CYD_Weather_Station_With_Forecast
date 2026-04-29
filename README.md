@@ -1,14 +1,15 @@
-# ESP32 Cheap Yellow Display (CYD) Weather Station with Hourly Forecast
+# ESP32 Cheap Yellow Display (CYD) Weather Station
 
-Companion repository for the article [Create an Internet Weather Station with 3 days Forecast on an ESP32 Cheap Yellow Display ("CYD")](https://medium.com/@androidcrypto/create-an-internet-weather-station-with-3-days-forecast-on-an-esp32-cheap-yellow-display-cyd-15eb5c353b1d).
-
+Based on the original by [AndroidCrypto](https://github.com/AndroidCrypto/ESP32_CYD_Weather_Station_With_Forecast), extended with a carousel bottom section, automatic brightness control, night mode, and motivational quotes.
 
 ## Features
 
-- **Current conditions** — weather icon (100×100 px), description text, feels-like temperature, temperature (large font), wind speed + compass direction icon, barometric pressure with trend arrow
+- **Current conditions** — weather icon (100×100 px), description, feels-like temperature, large temperature readout, wind speed + compass direction, barometric pressure with trend arrow
 - **Live clock** — HH:MM updated every minute via NTP (timezone + DST aware); header shows current date as `Www  Mmm D  YYYY`
-- **2-page bottom carousel** — cycles every 15 seconds between Page 1 and Page 2
-- **Auto-refresh** — weather data fetched every 30 minutes (configurable); uses only the free OpenWeatherMap forecast endpoint
+- **2-page bottom carousel** — cycles every 15 seconds between Page 1 (hourly forecast + astronomy) and Page 2 (4-day forecast + random quote)
+- **Automatic brightness** — built-in LDR (GPIO 34) adjusts backlight every 10 seconds based on ambient light
+- **Night mode** — backlight cuts off at `NIGHT_OFF_HOUR:59` and restores at `NIGHT_ON_HOUR:00`
+- **Auto-refresh** — weather data fetched every 30 minutes; uses only the free OpenWeatherMap forecast endpoint
 
 ## Display Layout
 
@@ -55,7 +56,7 @@ The bottom section cycles every 15 seconds between two pages.
 
 ### 1. Get an OpenWeatherMap API key
 
-Sign up for a free account at [openweathermap.org](https://openweathermap.org/). The free tier allows up to 1000 requests/day (~40/hour), which is well above the 15-minute update interval used here.
+Sign up for a free account at [openweathermap.org](https://openweathermap.org/). The free tier allows up to 1000 requests/day (~40/hour), which is well above the 30-minute update interval used here.
 
 ### 2. Configure `All_Settings.h`
 
@@ -108,23 +109,21 @@ To add a timezone not listed, add `TimeChangeRule` pairs to `NTP_Time.h` followi
 
 The sketch and filesystem live in separate flash partitions — uploads are independent.
 
-**Upload the filesystem** (only needed once, or when `data/` assets change):
+> ⚠️ On a **brand new device**, upload the filesystem at least once before powering up — the sketch will hang on boot with "Flash FS initialisation failed!" if LittleFS has never been written.
+
+**Step 1 — upload the filesystem** (only needed once, or when `data/` assets change):
 - VS Code: PlatformIO sidebar → Project Tasks → `esp32-cyd-st7789` → Platform → **Upload Filesystem Image**
 - CLI: `pio run --target uploadfs`
 
-**Flash the sketch** (any time code changes):
+**Step 2 — flash the sketch** (any time code changes):
 - VS Code: Project Tasks → **Upload**
 - CLI: `pio run --target upload`
-
-> ⚠️ On a **brand new device**, upload the filesystem at least once before powering up — the sketch will hang on boot with "Flash FS initialisation failed!" if LittleFS has never been written.
 
 ## Using PlatformIO (VS Code)
 
 [PlatformIO](https://docs.platformio.org) is an alternative to Arduino IDE that integrates directly into VS Code.
 
 ### Project structure
-
-This repository is already structured for PlatformIO:
 
 ```
 esp32-cyd-weather/
@@ -161,7 +160,7 @@ lib_deps =
 
 ### TFT_eSPI driver configuration
 
-With PlatformIO you configure TFT_eSPI via `build_flags` instead of copying header files into the library. Add to `platformio.ini` under `[env:esp32-cyd]`:
+With PlatformIO you configure TFT_eSPI via `build_flags` instead of copying header files into the library. Add to `platformio.ini` under `[env:esp32-cyd-st7789]`:
 
 ```ini
 build_flags =
@@ -186,29 +185,17 @@ build_flags =
     -DUSE_HSPI_PORT
 ```
 
-### Upload filesystem and sketch
-
-> ⚠️ On a brand new device, upload the filesystem at least once before the first boot — the sketch will hang if LittleFS has never been written. After that, filesystem and sketch uploads are independent.
-
-**Step 1 — upload the filesystem image:**
-
-- VS Code: PlatformIO sidebar → Project Tasks → `esp32-cyd-st7789` → Platform → **Upload Filesystem Image**
-- CLI: `pio run --target uploadfs`
-
-**Step 2 — flash the sketch:**
-
-- VS Code: Project Tasks → **Upload**
-- CLI: `pio run --target upload`
-
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| Blank/garbled display | Verify the correct TFT_eSPI setup header is active in `User_Setup_Select.h` |
-| Hangs on "Flash FS initialisation failed!" | LittleFS partition too small, or data files not yet uploaded |
-| Weather data shows "Failed to get data points" | Check API key and lat/long in `All_Settings.h`; verify WiFi connectivity via Serial monitor |
-| Corrupted filesystem after failed upload | Uncomment `#define FORMAT_LittleFS` in the main `.ino`, flash once to wipe, then re-comment and re-upload data + sketch |
+| White/inverted colours | Add `tft.invertDisplay(true)` after `tft.begin()` — required for ST7789 panels |
+| Blank/garbled display | Verify the correct TFT_eSPI driver is set in `platformio.ini` build_flags |
+| Hangs on "Flash FS initialisation failed!" | LittleFS partition too small, or filesystem not yet uploaded (run Step 1 above) |
+| Weather data shows "Failed to get data points" | Check API key and lat/long in `All_Settings.h`; verify WiFi via Serial monitor at 250000 baud |
+| Corrupted filesystem after failed upload | Uncomment `#define FORMAT_LittleFS` in the main `.ino`, flash once to wipe, then re-comment and re-upload |
 | Time shows wrong zone | Ensure `#define TIMEZONE` in `All_Settings.h` matches a zone defined in `NTP_Time.h` |
+| Brightness not adjusting | Confirm `#define AUTO_BRIGHTNESS` is set and LDR is on GPIO 34; check ADC readings via Serial |
 
 ## Debug Options
 
@@ -230,4 +217,4 @@ espressif32 platform (arduino-esp32 boards 3.2.0)  https://github.com/espressif/
 
 ## Credits
 
-Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Further adapted for the CYD platform and extended with moon phase display, barometric pressure, cloud cover, humidity, and next-3-hour forecast strip by AndroidCrypto.
+Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Extended for the CYD platform with moon phase display, barometric pressure, cloud cover, humidity, and forecast strip by [AndroidCrypto](https://github.com/AndroidCrypto). Further extended with a 2-page carousel, automatic LDR brightness control, night mode, feels-like temperature, pressure trend arrow, and motivational quotes by [Pranav E K](https://github.com/pranavek).
