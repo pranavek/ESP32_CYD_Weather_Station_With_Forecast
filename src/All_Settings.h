@@ -34,8 +34,8 @@ const int UPDATE_INTERVAL_SECS = 30UL * 60UL;  // 30 minutes
 // Screen brightness 0–255 (PWM duty on TFT_BL pin). 255 = max, 0 = off.
 #define SCREEN_BRIGHTNESS 200
 
-// Number of carousel pages for the bottom two sections (cycles every minute)
-#define PAGE_COUNT 3
+// Number of carousel pages for the bottom two sections
+#define PAGE_COUNT 2
 
 // Uncomment to enable NWS weather alerts (US locations only — uses api.weather.gov)
 //#define NWS_ALERTS

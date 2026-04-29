@@ -156,7 +156,8 @@ float     uvIndex = -1.0f;         // -1 = unknown
 char      nwsAlert[40] = "";       // empty = no active alert
 
 // Carousel state
-uint8_t   currentPage = 0;
+uint8_t        currentPage    = 0;
+unsigned long  lastPageCycle  = 0;
 
 /***************************************************************************************
 **                          Declare prototypes
@@ -184,11 +185,8 @@ void fetchAirQuality(void);
 void fetchUVIndex(void);
 void fetchNWSAlerts(void);
 void drawBottomSections(void);
-void drawPageIndicator(void);
-void drawHumanComfortStrip(void);
 void drawHumanComfortDetails(void);
 void drawDailyForecast(void);
-void drawRainProbability(void);
 void setBacklight(uint8_t level);
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
@@ -321,6 +319,16 @@ void loop() {
 #endif
   }
 
+  // Carousel — cycle bottom sections every 15 seconds
+  if (!nightMode && cacheValid && (millis() - lastPageCycle >= 15000UL)) {
+    lastPageCycle = millis();
+    currentPage = (currentPage + 1) % PAGE_COUNT;
+    tft.loadFont(AA_FONT_SMALL, LittleFS);
+    tft.fillRect(0, 154, 240, 166, TFT_BLACK);
+    drawBottomSections();
+    tft.unloadFont();
+  }
+
   booted = false;
 }
 
@@ -377,7 +385,6 @@ void updateData() {
     drawCurrentWeather();
     tft.fillRect(0, 154, 240, 166, TFT_BLACK);  // clear bottom region for fresh page
     drawBottomSections();
-    drawPageIndicator();
     tft.unloadFont();
 
     // Update the temperature here so we don't need to keep
@@ -468,15 +475,6 @@ void drawTime() {
 
   tft.unloadFont();
 
-  // Cycle the bottom-two-sections carousel every minute
-  if (cacheValid) {
-    currentPage = (currentPage + 1) % PAGE_COUNT;
-    tft.loadFont(AA_FONT_SMALL, LittleFS);
-    tft.fillRect(0, 154, 240, 166, TFT_BLACK);
-    drawBottomSections();
-    drawPageIndicator();
-    tft.unloadFont();
-  }
 }
 
 /***************************************************************************************
@@ -585,8 +583,8 @@ void drawForecastDetail(uint16_t x, uint16_t y, uint8_t slotIndex) {
   tft.drawString(strTime(s.dt), x + 25, y);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth(" -88o "));
-  tft.drawString(String(s.temp, 0) + "o", x + 25, y + 17);
+  tft.setTextPadding(tft.textWidth("-88oC"));
+  tft.drawString(String(s.temp, 0) + (units == "metric" ? "oC" : "oF"), x + 25, y + 17);
 
   String weatherIcon = getMeteoconIcon(s.id, false);
   ui.drawBmp("/icon50/" + weatherIcon + ".bmp", x, y + 18);
@@ -995,123 +993,21 @@ void fetchNWSAlerts(void) {
 void drawBottomSections(void) {
   if (!cacheValid) return;
   switch (currentPage) {
-    case 0:  // Hourly + Astronomy (existing)
+    case 0:  // Hourly forecast + Astronomy
       drawForecast();
       drawAstronomy();
       break;
-    case 1:  // Human Comfort
-      drawHumanComfortStrip();
+    case 1:  // 4-day forecast + gust/visibility/dew
+      drawDailyForecast();
       drawSeparator(240);
       drawHumanComfortDetails();
       break;
-    case 2:  // 4-day forecast + rain probability
-      drawDailyForecast();
-      drawSeparator(240);
-      drawRainProbability();
-      break;
   }
 }
 
 /***************************************************************************************
-**                          Page indicator dots (just above Y=153)
+**                          Page 2 — Human comfort details (gust / visibility / dew)
 ***************************************************************************************/
-void drawPageIndicator(void) {
-  const int y = 150;
-  const int spacing = 14;
-  const int dotR = 2;
-  int xStart = 120 - ((PAGE_COUNT - 1) * spacing) / 2;
-  for (int i = 0; i < PAGE_COUNT; i++) {
-    uint16_t color = (i == currentPage) ? TFT_WHITE : 0x4228;
-    tft.fillCircle(xStart + i * spacing, y, dotR, color);
-  }
-}
-
-/***************************************************************************************
-**                          Page 2 — Human Comfort: UV + AQI
-***************************************************************************************/
-static const char* aqiLabel(uint8_t v) {
-  switch (v) {
-    case 1: return "Good";
-    case 2: return "Fair";
-    case 3: return "Moderate";
-    case 4: return "Poor";
-    case 5: return "Very Poor";
-    default: return "--";
-  }
-}
-static const char* aqiAdvice(uint8_t v) {
-  switch (v) {
-    case 1: return "Go outside freely";
-    case 2: return "Sensitive: take care";
-    case 3: return "Limit outdoor cardio";
-    case 4: return "Avoid outdoor exertion";
-    case 5: return "Stay indoors";
-    default: return "Air data unavailable";
-  }
-}
-static const char* uvCategory(float uv) {
-  if (uv < 0)    return "--";
-  if (uv < 3.0f) return "Low";
-  if (uv < 6.0f) return "Moderate";
-  if (uv < 8.0f) return "High";
-  if (uv < 11.0f)return "Very High";
-  return "Extreme";
-}
-
-void drawHumanComfortStrip(void) {
-  // UV row at Y=170
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(0);
-  tft.drawString("UV", 12, 162);
-
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  String uvStr = (uvIndex < 0) ? String("--") : String(uvIndex, 1);
-  tft.drawString(uvStr, 38, 162);
-
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.setTextDatum(TR_DATUM);
-  tft.drawString(uvCategory(uvIndex), 228, 162);
-
-  // UV bar
-  int barX = 12, barY = 184, barW = 216, barH = 6;
-  tft.drawRect(barX, barY, barW, barH, 0x4228);
-  if (uvIndex > 0) {
-    int filled = (int)((uvIndex / 11.0f) * (barW - 2));
-    if (filled > barW - 2) filled = barW - 2;
-    uint16_t c = TFT_GREEN;
-    if (uvIndex >= 3) c = TFT_YELLOW;
-    if (uvIndex >= 6) c = TFT_ORANGE;
-    if (uvIndex >= 8) c = TFT_RED;
-    if (uvIndex >= 11) c = TFT_MAGENTA;
-    tft.fillRect(barX + 1, barY + 1, filled, barH - 2, c);
-  }
-
-  // Burn-time line
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  String burn;
-  if (uvIndex <= 0) burn = "Burn risk: --";
-  else if (uvIndex >= 11) burn = "Burn <15 min";
-  else {
-    int mins = (int)(200.0f / uvIndex);
-    burn = "Burn ~" + String(mins) + " min";
-  }
-  tft.drawString(burn, 12, 196);
-
-  // AQI line at Y=216
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.drawString("AQI", 12, 216);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  String aqiTxt = (airQualityIndex == 0) ? String("--") : (String(airQualityIndex) + " " + aqiLabel(airQualityIndex));
-  tft.drawString(aqiTxt, 44, 216);
-
-  // Advice
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(aqiAdvice(airQualityIndex), 12, 230);
-}
-
 void drawHumanComfortDetails(void) {
   // Three-column row at Y=250
   tft.setTextDatum(TC_DATUM);
@@ -1146,7 +1042,7 @@ void drawHumanComfortDetails(void) {
 }
 
 /***************************************************************************************
-**                          Page 3 — 4-day forecast + rain probability
+**                          4-day daily forecast columns
 ***************************************************************************************/
 static const char* dowAbbrev(uint8_t dow) {
   // weekday() returns 1=Sun..7=Sat
@@ -1174,29 +1070,6 @@ void drawDailyForecast(void) {
 
     String icon = getMeteoconIcon(d.id, false);
     ui.drawBmp("/icon50/" + icon + ".bmp", x, y + 18);
-  }
-  tft.setTextPadding(0);
-}
-
-void drawRainProbability(void) {
-  // 4-column row matching the days above. Y=250 day label, Y=270 percent.
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  tft.setTextPadding(0);
-  tft.drawString("Rain chance", 120, 250);
-
-  for (int i = 0; i < 4; i++) {
-    DayCache& d = dayCache[i];
-    int x = 8 + i * 58 + 25;  // column centre (matches forecast strip)
-    if (d.dow == 0) continue;
-    int pct = (int)(d.pop * 100.0f + 0.5f);
-    if (pct > 100) pct = 100;
-    uint16_t color = TFT_LIGHTGREY;
-    if (pct >= 70)      color = TFT_CYAN;
-    else if (pct >= 40) color = TFT_YELLOW;
-    else if (pct >= 15) color = TFT_WHITE;
-    tft.setTextColor(color, TFT_BLACK);
-    tft.drawString(String(pct) + "%", x, 275);
   }
   tft.setTextPadding(0);
 }
