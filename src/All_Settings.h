@@ -31,8 +31,8 @@ const int UPDATE_INTERVAL_SECS = 30UL * 60UL;  // 30 minutes
 #define NIGHT_OFF_HOUR  23
 #define NIGHT_ON_HOUR    6
 
-// Screen brightness 0–255 (PWM duty on TFT_BL pin). 255 = max, 0 = off.
-#define SCREEN_BRIGHTNESS 200
+// Max screen brightness 0–255. Used as ceiling by auto-brightness; fixed level when AUTO_BRIGHTNESS is disabled.
+#define SCREEN_BRIGHTNESS 150
 
 // Automatic brightness via built-in LDR (GPIO 34 on CYD ESP32-2432S028R).
 // Comment out AUTO_BRIGHTNESS to use fixed SCREEN_BRIGHTNESS instead.
