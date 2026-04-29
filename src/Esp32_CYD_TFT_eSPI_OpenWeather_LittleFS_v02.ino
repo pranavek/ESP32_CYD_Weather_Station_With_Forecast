@@ -568,8 +568,8 @@ void drawForecastDetail(uint16_t x, uint16_t y, uint8_t slotIndex) {
   tft.drawString(strTime(s.dt), x + 25, y);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextPadding(tft.textWidth("-88oC"));
-  tft.drawString(String(s.temp, 0) + (units == "metric" ? "oC" : "oF"), x + 25, y + 17);
+  tft.setTextPadding(tft.textWidth(" -88 "));
+  tft.drawString(String(s.temp, 0), x + 25, y + 17);
 
   String weatherIcon = getMeteoconIcon(s.id, false);
   ui.drawBmp("/icon50/" + weatherIcon + ".bmp", x, y + 18);
