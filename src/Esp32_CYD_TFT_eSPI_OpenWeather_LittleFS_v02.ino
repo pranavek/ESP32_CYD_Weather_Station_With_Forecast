@@ -176,6 +176,7 @@ void drawBottomSections(void);
 void drawQuote(void);
 void drawDailyForecast(void);
 void setBacklight(uint8_t level);
+void updateBrightness(bool nightMode);
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   // Stop further decoding as image is running off bottom of screen
@@ -286,7 +287,7 @@ void loop() {
   bool nightMode = !booted &&
                    ((h < NIGHT_ON_HOUR) || (h == NIGHT_OFF_HOUR && m >= 59));
 
-  setBacklight(nightMode ? 0 : SCREEN_BRIGHTNESS);
+  updateBrightness(nightMode);
 
   // Weather update — timer not advanced during night so wake-up fetch is immediate
   if (booted || (millis() - lastDownloadUpdate > 1000UL * UPDATE_INTERVAL_SECS)) {
@@ -744,6 +745,25 @@ int getNextSlotIndex(void) {
 ***************************************************************************************/
 void setBacklight(uint8_t level) {
   ledcWrite(0, level);  // channel 0 (attached to TFT_BL in setup)
+}
+
+void updateBrightness(bool nightMode) {
+  if (nightMode) { setBacklight(0); return; }
+#ifdef AUTO_BRIGHTNESS
+  static uint8_t  current    = SCREEN_BRIGHTNESS;
+  static uint32_t lastUpdate = 0;
+  if (millis() - lastUpdate < 10000UL) return;  // sample every 10 seconds
+  lastUpdate = millis();
+  int raw = 0;
+  for (int i = 0; i < 8; i++) raw += analogRead(LDR_PIN);
+  raw >>= 3;  // average 8 readings
+  int target = map(raw, 0, 4095, LDR_MIN_BRIGHT, SCREEN_BRIGHTNESS);
+  target = constrain(target, (int)LDR_MIN_BRIGHT, (int)SCREEN_BRIGHTNESS);
+  current = (uint8_t)((current * 7 + target) / 8);  // EMA, α≈0.125
+  setBacklight(current);
+#else
+  setBacklight(SCREEN_BRIGHTNESS);
+#endif
 }
 
 /***************************************************************************************

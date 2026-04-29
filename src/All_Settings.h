@@ -34,6 +34,12 @@ const int UPDATE_INTERVAL_SECS = 30UL * 60UL;  // 30 minutes
 // Screen brightness 0–255 (PWM duty on TFT_BL pin). 255 = max, 0 = off.
 #define SCREEN_BRIGHTNESS 200
 
+// Automatic brightness via built-in LDR (GPIO 34 on CYD ESP32-2432S028R).
+// Comment out AUTO_BRIGHTNESS to use fixed SCREEN_BRIGHTNESS instead.
+#define AUTO_BRIGHTNESS
+#define LDR_PIN        34   // analog-in pin wired to the LDR
+#define LDR_MIN_BRIGHT  5   // PWM floor in total darkness (0–255)
+
 // Number of carousel pages for the bottom two sections
 #define PAGE_COUNT 2
 
