@@ -197,6 +197,7 @@ void setup() {
   Serial.println(PROGRAM_VERSION);
 
   tft.begin();
+  tft.invertDisplay(true);  // ST7789 requires inversion to render colours correctly
   tft.setRotation(2);  // 180° portrait
   tft.fillScreen(TFT_BLACK);
 
