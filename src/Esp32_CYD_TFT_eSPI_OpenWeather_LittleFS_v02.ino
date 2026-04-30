@@ -756,7 +756,8 @@ void updateBrightness(bool nightMode) {
   int raw = 0;
   for (int i = 0; i < 8; i++) raw += analogRead(LDR_PIN);
   raw >>= 3;  // average 8 readings
-  int target = map(raw, 0, 4095, LDR_MIN_BRIGHT, SCREEN_BRIGHTNESS);
+  // CYD wiring: 3.3V → 10kΩ → GPIO34 → LDR → GND, so bright light → low raw, dark → high raw.
+  int target = map(raw, 0, 4095, SCREEN_BRIGHTNESS, LDR_MIN_BRIGHT);
   target = constrain(target, (int)LDR_MIN_BRIGHT, (int)SCREEN_BRIGHTNESS);
   current = (uint8_t)((current * 7 + target) / 8);  // EMA, α≈0.125
   setBacklight(current);
