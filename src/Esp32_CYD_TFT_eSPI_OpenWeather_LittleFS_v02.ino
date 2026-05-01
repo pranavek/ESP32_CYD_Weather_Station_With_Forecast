@@ -761,6 +761,9 @@ void updateBrightness(bool nightMode) {
   target = constrain(target, (int)LDR_MIN_BRIGHT, (int)SCREEN_BRIGHTNESS);
   current = (uint8_t)((current * 7 + target) / 8);  // EMA, α≈0.125
   setBacklight(current);
+#ifdef SERIAL_MESSAGES
+  Serial.printf("[LDR] raw=%4d target=%3d current=%3d\n", raw, target, current);
+#endif
 #else
   setBacklight(SCREEN_BRIGHTNESS);
 #endif
