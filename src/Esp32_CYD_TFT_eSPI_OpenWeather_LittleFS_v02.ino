@@ -5,9 +5,8 @@
   The weather data is retrieved from OpenWeatherMap.org service and you need to get your own 
   (free) API key before running the sketch.
 
-  WiFi credentials, OpenWeatherMap key, location, timezone, and brightness are entered through the
-  webflasher page in docs/flasher/ and persisted to NVS at first boot. The values in All_Settings.h
-  are compile-time fallbacks only.
+  Please add the key, your Wi-Fi credentials, the location coordinates for the weather information and
+  additional data about your Timezone in the settings file: 'All_Settings.h'.
 
   The code is not written by me, but from Daniel Eichhorn (https://blog.squix.ch) and was 
   adapted by Bodmer as an example for his OpenWeather library (https://github.com/Bodmer/OpenWeather/).
@@ -92,7 +91,7 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 #endif
 
 
-// Compile-time defaults. Runtime values come from Config (NVS).
+// User-facing settings.
 #include "All_Settings.h"
 
 #include <JSON_Decoder.h>  // https://github.com/Bodmer/JSON_Decoder
@@ -102,8 +101,6 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 #include "NTP_Time.h"  // Attached to this sketch, see that tab for library needs
 // Time zone correction library: https://github.com/JChristensen/Timezone
 
-#include "Config.h"
-#include "Provisioning.h"
 
 /***************************************************************************************
 **                          Define the globals and class instances
@@ -205,15 +202,10 @@ void setup() {
   tft.setRotation(2);  // 180° portrait
   tft.fillScreen(TFT_BLACK);
 
-  // PWM backlight on TFT_BL — fixed level from Config (set via webflasher).
+  // PWM backlight on TFT_BL — fixed level from SCREEN_BRIGHTNESS.
   ledcSetup(0, 5000, 8);          // channel 0, 5 kHz, 8-bit
   ledcAttachPin(TFT_BL, 0);
-  Config::begin();
-  if (!Config::isProvisioned()) {
-    setBacklight(Config::brightness());
-    Provisioning::run(tft);  // never returns
-  }
-  setBacklight(Config::brightness());
+  setBacklight(SCREEN_BRIGHTNESS);
 
   if (!LittleFS.begin()) {
     Serial.println("Flash FS initialisation failed!");
@@ -261,13 +253,13 @@ void setup() {
 
 // Call once for ESP32 and ESP8266
 #if !defined(ARDUINO_ARCH_MBED)
-  WiFi.begin(Config::wifiSsid(), Config::wifiPassword());
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 #endif
 
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
 #if defined(ARDUINO_ARCH_MBED) || defined(ARDUINO_ARCH_RP2040)
-    if (WiFi.status() != WL_CONNECTED) WiFi.begin(Config::wifiSsid(), Config::wifiPassword());
+    if (WiFi.status() != WL_CONNECTED) WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 #endif
     delay(500);
   }
@@ -289,9 +281,7 @@ void setup() {
 **                          Loop
 ***************************************************************************************/
 void loop() {
-  Provisioning::poll();
-
-  time_t local_t = Config::timezone()->toLocal(now(), &tz1_Code);
+  time_t local_t = TIMEZONE.toLocal(now(), &tz1_Code);
   uint8_t h = hour(local_t);
   uint8_t m = minute(local_t);
   bool nightMode = !booted &&
@@ -349,8 +339,8 @@ void updateData() {
   // Create the structure that holds the retrieved weather
   forecast = new OW_forecast;
 
-  String lat = Config::latitude();
-  String lon = Config::longitude();
+  String lat = latitude;
+  String lon = longitude;
 
 #ifdef RANDOM_LOCATION  // Randomly choose a place on Earth to test icons etc
   lat = String(random(180) - 90);
@@ -361,7 +351,7 @@ void updateData() {
   Serial.println(lon);
 #endif
 
-  bool parsed = ow.getForecast(forecast, Config::apiKey(), lat, lon, units, language);
+  bool parsed = ow.getForecast(forecast, api_key, lat, lon, units, language);
 
   if (parsed) Serial.println("Data points received");
   else Serial.println("Failed to get data points");
@@ -433,7 +423,7 @@ void drawProgress(uint8_t percentage, String text) {
 void drawTime() {
   // Date — redraws every minute so midnight crossover is always correct
   tft.loadFont(AA_FONT_SMALL, LittleFS);
-  time_t local_time = Config::timezone()->toLocal(now(), &tz1_Code);
+  time_t local_time = TIMEZONE.toLocal(now(), &tz1_Code);
   String date = String(dayShortStr(weekday(local_time))) + "  " +
                 String(monthShortStr(month(local_time))) + " " +
                 String(day(local_time)) + "  " +
@@ -447,7 +437,7 @@ void drawTime() {
   tft.loadFont(AA_FONT_LARGE, LittleFS);
 
   // Convert UTC to local time, returns zone code in tz1_Code, e.g "GMT"
-  local_time = Config::timezone()->toLocal(now(), &tz1_Code);
+  local_time = TIMEZONE.toLocal(now(), &tz1_Code);
 
   String timeNow = "";
 
@@ -769,7 +759,7 @@ void setBacklight(uint8_t level) {
 }
 
 void updateBrightness(bool nightMode) {
-  setBacklight(nightMode ? 0 : Config::brightness());
+  setBacklight(nightMode ? 0 : SCREEN_BRIGHTNESS);
 }
 
 /***************************************************************************************
@@ -798,14 +788,14 @@ void cacheForecastData(void) {
     dayCache[d].id   = 0;
     dayCache[d].pop  = 0.0f;
   }
-  time_t nowLocal = Config::timezone()->toLocal(now(), &tz1_Code);
+  time_t nowLocal = TIMEZONE.toLocal(now(), &tz1_Code);
   int todayDay = day(nowLocal);
   int filled = 0;
   int lastDayKey = todayDay;
   int dayBestSlotIdx = -1;
   uint8_t dayBestHourDist = 24;
   for (int i = 0; i < MAX_DAYS * 8 && filled < 4; i++) {
-    time_t local = Config::timezone()->toLocal(forecast->dt[i], &tz1_Code);
+    time_t local = TIMEZONE.toLocal(forecast->dt[i], &tz1_Code);
     int dKey = day(local);
     if (dKey == todayDay) continue;
     if (filled == 0 || dKey != lastDayKey) {
@@ -842,7 +832,7 @@ void cacheForecastData(void) {
   cachedHumidity   = forecast->humidity[0];
   cachedClouds     = forecast->clouds_all[0];
   // Moon
-  time_t local0 = Config::timezone()->toLocal(forecast->dt[0], &tz1_Code);
+  time_t local0 = TIMEZONE.toLocal(forecast->dt[0], &tz1_Code);
   int ip;
   cachedMoonIcon     = moon_phase(year(local0), month(local0), day(local0), hour(local0), &ip);
   cachedMoonPhaseIdx = ip;
@@ -1030,7 +1020,7 @@ void printWeather(void) {
 **             Convert Unix time to a "local time" time string "12:34"
 ***************************************************************************************/
 String strTime(time_t unixTime) {
-  time_t local_time = Config::timezone()->toLocal(unixTime, &tz1_Code);
+  time_t local_time = TIMEZONE.toLocal(unixTime, &tz1_Code);
 
   String localTime = "";
 
@@ -1047,7 +1037,7 @@ String strTime(time_t unixTime) {
 **  Convert Unix time to a local date + time string "Oct 16 17:18", ends with newline
 ***************************************************************************************/
 String strDate(time_t unixTime) {
-  time_t local_time = Config::timezone()->toLocal(unixTime, &tz1_Code);
+  time_t local_time = TIMEZONE.toLocal(unixTime, &tz1_Code);
 
   String localDate = "";
 
