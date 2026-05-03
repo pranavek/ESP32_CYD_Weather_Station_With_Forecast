@@ -110,8 +110,10 @@
       return data;
     }
 
+    const log = (m) => console.log('[prov]', m);
+
     // Reads framed lines from `reader` until `predicate` returns true or `untilMs` elapses.
-    async function readUntilLine(reader, predicate, untilMs, lineQueue, pumpLines, log) {
+    async function readUntilLine(reader, predicate, untilMs, lineQueue, pumpLines) {
       while (Date.now() < untilMs) {
         while (lineQueue.length) {
           const line = lineQueue.shift();
@@ -128,10 +130,29 @@
       return null;
     }
 
-    // Sends `<<PROV {json}>>\n` over an open Web Serial port and waits for `<<PROV OK>>`.
-    // When `nudge` is true, sends `<<PROV PING>>` first to confirm the device is in setup
-    // mode without waiting for the 60-second heartbeat.
-    async function sendConfig(port, cfg, { nudge = false, log = () => {} } = {}) {
+    // Opens `port` at 250 000 baud and forces a clean chip reset into app mode.
+    // On the CYD's CH340, RTS controls EN (chip reset) and DTR controls GPIO0
+    // (boot-mode strap). After ESP Web Tools' Improv probe the chip can be left
+    // in download mode; we hold DTR=false (GPIO0 high → run from flash) and
+    // pulse RTS (true → low EN → false → high EN) to boot the app firmware.
+    async function openPortAndResetChip(port) {
+      await port.open({ baudRate: 250000 });
+      try {
+        await port.setSignals({ dataTerminalReady: false, requestToSend: true });
+        await new Promise(r => setTimeout(r, 100));
+        await port.setSignals({ requestToSend: false });
+      } catch (e) {
+        // Some platforms fail setSignals if the port is mid-handshake; the
+        // 4 s boot wait below absorbs a stale reset.
+        log('setSignals failed: ' + e.message);
+      }
+      // Wait for setup() → Provisioning::run / main loop poll() to come up.
+      await new Promise(r => setTimeout(r, 4000));
+    }
+
+    // Drives the actual provisioning sequence on an already-open `port`:
+    // PING → wait for PONG/READY → send config → wait for OK.
+    async function provisionOpenPort(port, cfg) {
       const enc = new TextEncoder();
       const dec = new TextDecoder();
       const writer = port.writable.getWriter();
@@ -153,8 +174,9 @@
       };
 
       try {
-        // Drain stale boot output (bootloader text at 115200 looks like garbage at 250000).
-        const drainUntil = Date.now() + 600;
+        // Drain stale boot bytes — the bootloader prints at 115 200 baud and
+        // is unintelligible to a reader at 250 000 (we'd see lone garbage bytes).
+        const drainUntil = Date.now() + 800;
         while (Date.now() < drainUntil) {
           const { value } = await Promise.race([
             reader.read(),
@@ -164,17 +186,15 @@
         }
         lineQueue.length = 0;
 
-        if (nudge) {
-          log('> <<PROV PING>>');
-          await writer.write(enc.encode('<<PROV PING>>\n'));
-          const ack = await readUntilLine(
-            reader,
-            (l) => l === '<<PROV PONG>>' || l === '<<PROV READY>>',
-            Date.now() + 10000,
-            lineQueue, pumpLines, log,
-          );
-          if (!ack) throw new Error('Device did not respond to PING — not in setup mode?');
-        }
+        log('> <<PROV PING>>');
+        await writer.write(enc.encode('<<PROV PING>>\n'));
+        const ack = await readUntilLine(
+          reader,
+          (l) => l === '<<PROV PONG>>' || l === '<<PROV READY>>',
+          Date.now() + 10000,
+          lineQueue, pumpLines,
+        );
+        if (!ack) throw new Error('Device did not respond to PING — is it running CYD-weather firmware at 250 000 baud?');
 
         const payload = '<<PROV ' + JSON.stringify(cfg) + '>>\n';
         log('> sending config (' + payload.length + ' bytes)');
@@ -184,7 +204,7 @@
           reader,
           (l) => l === '<<PROV OK>>' || l.startsWith('<<PROV ERR'),
           Date.now() + 15000,
-          lineQueue, pumpLines, log,
+          lineQueue, pumpLines,
         );
         if (!result) throw new Error('Timed out waiting for <<PROV OK>>');
         if (result.startsWith('<<PROV ERR')) throw new Error(result);
@@ -194,56 +214,69 @@
       }
     }
 
-    // Auto-runs after ESP Web Tools finishes flashing. Reuses the port the install
-    // dialog already had access to — no fresh port picker, no second click.
-    async function autoProvisionAfterFlash() {
-      let cfg;
-      try { cfg = collectConfig(); }
-      catch (e) {
-        setStatus('Firmware flashed, but the form is invalid: ' + e.message
-                  + '. Fix the field and click Reconfigure to send the config.', 'err');
-        return;
+    // Polls navigator.serial.getPorts() and tries to open whichever port has
+    // already been granted. Resolves with the open Port (already chip-reset)
+    // or null on timeout.
+    async function awaitGrantedPort(timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const ports = await navigator.serial.getPorts();
+        const candidate = ports[ports.length - 1];  // most recent grant
+        if (candidate) {
+          try {
+            await openPortAndResetChip(candidate);
+            return candidate;
+          } catch (e) {
+            // ESP Web Tools may still hold the port; back off and retry.
+            log('open retry: ' + e.message);
+          }
+        }
+        await new Promise(r => setTimeout(r, 1000));
       }
+      return null;
+    }
 
-      setStatus('Firmware flashed. Waiting for device to boot into setup mode…');
-      // Wait for chip reset + new firmware boot (TFT init + Config + Provisioning::run prints READY).
-      await new Promise(r => setTimeout(r, 4000));
-
-      const ports = await navigator.serial.getPorts();
-      if (!ports.length) {
-        setStatus('Flashed, but the browser has no granted serial port. Click Reconfigure to send config.', 'warn');
-        return;
-      }
-      // ESP Web Tools used the most recently granted port — pick it.
-      const port = ports[ports.length - 1];
-
-      let opened = false;
+    // Triggered when the user clicks the install button. Runs in parallel with
+    // ESP Web Tools' flash flow: as soon as the install dialog releases the port,
+    // we grab it, reset the chip, and provision. No `state-changed` listener
+    // needed — that event proved unreliable in v10.2.1.
+    let autoProvisionInFlight = false;
+    async function autoProvisionAfterClick() {
+      if (autoProvisionInFlight) return;
+      autoProvisionInFlight = true;
       try {
-        try {
-          await port.open({ baudRate: 250000 });
-          opened = true;
-        } catch (e) {
-          // Install dialog may still hold the port for a moment; retry once.
-          await new Promise(r => setTimeout(r, 2000));
-          await port.open({ baudRate: 250000 });
-          opened = true;
+        let cfg;
+        try { cfg = collectConfig(); }
+        catch (e) {
+          setStatus('Form invalid: ' + e.message + ' — fix the field, then click Reconfigure after flashing.', 'err');
+          return;
         }
 
-        setStatus('Sending config to device…');
-        await sendConfig(port, cfg, { nudge: true, log: (m) => console.log('[prov]', m) });
-        setStatus('All set — device rebooted with your config.', 'ok');
-      } catch (e) {
-        console.error(e);
-        setStatus('Auto-provision failed: ' + e.message + '. Click Reconfigure to retry.', 'err');
-      } finally {
-        if (opened) {
+        setStatus('Flashing… the page will auto-send your config when the install dialog finishes.');
+        const port = await awaitGrantedPort(5 * 60 * 1000);
+        if (!port) {
+          setStatus('Timed out waiting for the install dialog to release the port. Click Reconfigure to retry.', 'err');
+          return;
+        }
+
+        try {
+          setStatus('Sending config to device…');
+          await provisionOpenPort(port, cfg);
+          setStatus('Done — device rebooted with your config.', 'ok');
+        } catch (e) {
+          console.error(e);
+          setStatus('Auto-provision failed: ' + e.message + ' — click Reconfigure to retry.', 'err');
+        } finally {
           try { await port.close(); } catch {}
         }
+      } finally {
+        autoProvisionInFlight = false;
       }
     }
 
-    // For an already-flashed device — picks a port, optionally wipes, then provisions.
-    async function provisionWithPicker({ wipeFirst = false } = {}) {
+    // Manual "Reconfigure only" path for already-flashed devices. Picks a port
+    // via the browser dialog, runs the same reset+provision sequence.
+    async function provisionWithPicker() {
       let cfg;
       try { cfg = collectConfig(); }
       catch (e) { setStatus(e.message, 'err'); return; }
@@ -257,23 +290,15 @@
       let port;
       try {
         port = await navigator.serial.requestPort({});
-        await port.open({ baudRate: 250000 });
       } catch (e) {
         setStatus('Port selection cancelled.', 'warn');
         return;
       }
 
       try {
-        if (wipeFirst) {
-          setStatus('Wiping existing config…');
-          const writer = port.writable.getWriter();
-          await writer.write(new TextEncoder().encode('<<PROV WIPE>>\n'));
-          writer.releaseLock();
-          await new Promise(r => setTimeout(r, 3000));  // device reboots into PROV mode
-        }
-
+        await openPortAndResetChip(port);
         setStatus('Sending config to device…');
-        await sendConfig(port, cfg, { nudge: wipeFirst, log: (m) => console.log('[prov]', m) });
+        await provisionOpenPort(port, cfg);
         setStatus('Done — device rebooted with your config.', 'ok');
       } catch (e) {
         console.error(e);
@@ -283,37 +308,10 @@
       }
     }
 
-    // Single state-changed listener — drives all UX feedback for the install button.
     document.querySelector('esp-web-install-button')
-      .addEventListener('state-changed', async (ev) => {
-        const s = ev.detail;
-        console.log('[esp-web]', s.state, s.message || '');
-        switch (s.state) {
-          case 'INITIALIZING':
-          case 'MANIFEST':
-          case 'PREPARING':
-            setStatus('Connecting to device…');
-            break;
-          case 'ERASING':
-            setStatus('Erasing flash…');
-            break;
-          case 'WRITING': {
-            const pct = s.details && typeof s.details.percentage === 'number'
-              ? ' ' + s.details.percentage + '%' : '';
-            setStatus('Writing flash…' + pct);
-            break;
-          }
-          case 'FINISHED':
-            await autoProvisionAfterFlash();
-            break;
-          case 'ERROR':
-            setStatus('Flash failed: ' + (s.message || 'unknown error'), 'err');
-            break;
-        }
-      });
+      .addEventListener('click', () => autoProvisionAfterClick());
 
-    // Already-flashed devices reconfigure via the picker.
-    $('#reprov').addEventListener('click', () => provisionWithPicker({ wipeFirst: false }));
+    $('#reprov').addEventListener('click', () => provisionWithPicker());
   </script>
 </body>
 </html>

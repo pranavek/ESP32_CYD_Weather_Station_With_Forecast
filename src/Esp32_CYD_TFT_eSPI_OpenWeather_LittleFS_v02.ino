@@ -289,7 +289,7 @@ void setup() {
 **                          Loop
 ***************************************************************************************/
 void loop() {
-  Provisioning::pollWipe();
+  Provisioning::poll();
 
   time_t local_t = Config::timezone()->toLocal(now(), &tz1_Code);
   uint8_t h = hour(local_t);
@@ -641,9 +641,14 @@ const char* getMeteoconIcon(uint16_t id, time_t when) {
   // Night offset uses the time-of-day of `when` vs today's sunrise/sunset, so
   // forecast slots in the next few days resolve to night icons after sunset.
   if (id / 100 == 8 && cachedSunrise > 0) {
+    // All three values are UTC; we compare seconds-of-day. When local sunset
+    // crosses midnight UTC the day window wraps (sr > ss), so handle that
+    // case explicitly — otherwise daytime hours after the ss-wrap test as night.
     auto sod = [](time_t t) { return hour(t) * 3600 + minute(t) * 60 + second(t); };
     long s = sod(when), sr = sod(cachedSunrise), ss = sod(cachedSunset);
-    if (s < sr || s > ss) id += 1000;
+    bool isDay = (sr <= ss) ? (s >= sr && s <= ss)
+                            : (s >= sr || s <= ss);
+    if (!isDay) id += 1000;
   }
   // see issue https://github.com/Bodmer/OpenWeather/issues/26
   if (id / 100 == 2) return "thunderstorm";

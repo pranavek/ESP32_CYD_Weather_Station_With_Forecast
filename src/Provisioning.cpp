@@ -42,6 +42,41 @@ String extractJson(const String& line) {
   return line.substring(start, end);
 }
 
+// Handles one framed `<<PROV …>>` line. May reboot the device on success.
+// Returns true if the line was a recognised command (so the caller can stop
+// looking).
+bool handleLine(const String& line) {
+  if (line == "<<PROV PING>>") {
+    Serial.println("<<PROV PONG>>");
+    return true;
+  }
+  if (line == "<<PROV WIPE>>") {
+    Serial.println("<<PROV WIPED>>");
+    Config::wipe();
+    Serial.flush();
+    delay(200);
+    ESP.restart();
+    return true;  // unreachable
+  }
+  if (line.startsWith(kFrameOpen)) {
+    String payload = extractJson(line);
+    if (payload.length() == 0) {
+      Serial.println("<<PROV ERR frame>>");
+      return true;
+    }
+    if (Config::applyJson(payload.c_str(), payload.length())) {
+      Serial.println("<<PROV OK>>");
+      Serial.flush();
+      delay(500);
+      ESP.restart();
+      return true;  // unreachable
+    }
+    Serial.println("<<PROV ERR json>>");
+    return true;
+  }
+  return false;
+}
+
 void drawWaitingScreen(TFT_eSPI& tft) {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
@@ -69,45 +104,23 @@ void run(TFT_eSPI& tft) {
       Serial.println("<<PROV READY>>");
       continue;
     }
-
-    if (line == "<<PROV PING>>") {
-      Serial.println("<<PROV PONG>>");
-      continue;
-    }
-
-    String payload = extractJson(line);
-    if (payload.length() == 0) {
-      Serial.println("<<PROV ERR frame>>");
-      continue;
-    }
-
-    if (Config::applyJson(payload.c_str(), payload.length())) {
-      Serial.println("<<PROV OK>>");
-      Serial.flush();
-      delay(500);
-      ESP.restart();
-    } else {
-      Serial.println("<<PROV ERR json>>");
-    }
+    handleLine(line);
   }
 }
 
-void pollWipe() {
+// Non-blocking serial poll — accumulates one line at a time and dispatches
+// to handleLine. Lets a provisioned device accept PING / WIPE / config-rewrite
+// from the main loop without going through Provisioning::run.
+void poll() {
   static String buf;
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\r') continue;
     if (c == '\n') {
-      if (buf == "<<PROV WIPE>>") {
-        Serial.println("<<PROV WIPED>>");
-        Config::wipe();
-        Serial.flush();
-        delay(200);
-        ESP.restart();
-      }
+      if (buf.length() > 0) handleLine(buf);
       buf = "";
     } else {
-      if (buf.length() < 64) buf += c;
+      if (buf.length() < kMaxLine) buf += c;
       else buf = "";
     }
   }
