@@ -11,8 +11,10 @@ namespace Provisioning {
 // Call only when Config::isProvisioned() is false.
 void run(TFT_eSPI& tft);
 
-// Non-blocking poll for `<<PROV WIPE>>` from Serial during normal operation.
-// Wipes NVS and restarts the device when the command is received.
-void pollWipe();
+// Non-blocking serial poll. Reads one line at a time during the main loop and
+// dispatches `<<PROV PING>>`, `<<PROV WIPE>>`, and `<<PROV {…json…}>>` config
+// blobs without going through Provisioning::run. Reboots on WIPE or successful
+// config-apply.
+void poll();
 
 }  // namespace Provisioning
