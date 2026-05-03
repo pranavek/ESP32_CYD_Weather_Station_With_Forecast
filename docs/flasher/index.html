@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CYD Weather flasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 16px/1.45 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: .25rem; }
+    .sub { color: #888; margin-top: 0; }
+    fieldset { border: 1px solid #ccc4; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; }
+    legend { padding: 0 .5rem; font-weight: 600; }
+    label { display: block; margin: .6rem 0 .15rem; font-size: .9rem; }
+    input, select { width: 100%; box-sizing: border-box; padding: .5rem .6rem; border: 1px solid #888; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .slider-row { display: flex; align-items: center; gap: 1rem; }
+    .slider-row input[type=range] { flex: 1; }
+    .slider-row output { min-width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
+    .actions { display: flex; gap: 1rem; align-items: center; margin-top: 1rem; flex-wrap: wrap; }
+    .status { padding: .75rem 1rem; border-radius: 6px; background: #00000010; font-size: .9rem; min-height: 1.2em; }
+    .status.ok    { background: #00aa3322; }
+    .status.err   { background: #cc222222; }
+    .status.warn  { background: #cc992222; }
+    .browser-warn { background: #cc992222; padding: .75rem 1rem; border-radius: 6px; margin-bottom: 1rem; }
+    .browser-warn:empty { display: none; }
+    button { font: inherit; padding: .55rem 1rem; border-radius: 6px; border: 1px solid #888; background: transparent; color: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <h1>CYD Weather flasher</h1>
+  <p class="sub">Flashes a Cheap Yellow Display ESP32 with the weather firmware and provisions it with your settings — all from this page over USB.</p>
+
+  <div class="browser-warn" id="browser-warn"></div>
+
+  <form id="form">
+    <fieldset>
+      <legend>WiFi</legend>
+      <label>SSID <input name="ssid" required></label>
+      <label>Password <input name="pass" type="password"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>OpenWeatherMap</legend>
+      <label>API key <input name="api_key" required placeholder="32-character hex"></label>
+      <div class="row">
+        <label>Latitude <input name="lat" required placeholder="40.7498"></label>
+        <label>Longitude <input name="lon" required placeholder="-73.9863"></label>
+      </div>
+      <label>Timezone
+        <select name="tz">
+          <option value="usET">US Eastern</option>
+          <option value="usCT" selected>US Central</option>
+          <option value="usMT">US Mountain</option>
+          <option value="usAZ">US Arizona (no DST)</option>
+          <option value="usPT">US Pacific</option>
+          <option value="UK">United Kingdom</option>
+          <option value="euCET">Central Europe</option>
+          <option value="ausET">Australia Eastern</option>
+        </select>
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Display</legend>
+      <label>Brightness</label>
+      <div class="slider-row">
+        <input type="range" name="brightness" min="0" max="255" value="150" id="bright">
+        <output for="bright" id="bright-out">150</output>
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+      <button type="button" id="reprov" title="Skip flashing — only resend config to an already-flashed device">Reconfigure only</button>
+    </div>
+    <div class="status" id="status">Fill in the form, then click Connect to flash. The device will reboot and start fetching weather.</div>
+  </form>
+
+  <script type="module">
+    const $       = (sel) => document.querySelector(sel);
+    const form    = $('#form');
+    const status  = $('#status');
+    const bright  = $('#bright');
+    const brightO = $('#bright-out');
+    bright.addEventListener('input', () => brightO.textContent = bright.value);
+
+    if (!('serial' in navigator)) {
+      $('#browser-warn').textContent =
+        'Web Serial is required and only Chromium-based browsers (Chrome, Edge, Opera) support it. Firefox and Safari will not work.';
+    }
+
+    function setStatus(text, kind = '') {
+      status.textContent = text;
+      status.className = 'status' + (kind ? ' ' + kind : '');
+    }
+
+    function collectConfig() {
+      const data = Object.fromEntries(new FormData(form).entries());
+      data.brightness = Number(data.brightness);
+      // Validate.
+      for (const k of ['ssid', 'api_key', 'lat', 'lon', 'tz']) {
+        if (!data[k]) throw new Error('Missing ' + k);
+      }
+      if (Number.isNaN(parseFloat(data.lat)) || Number.isNaN(parseFloat(data.lon))) {
+        throw new Error('Latitude and longitude must be numbers.');
+      }
+      return data;
+    }
+
+    // Sends `<<PROV {json}>>\n` over an open Web Serial port and waits for
+    // `<<PROV OK>>`, returning true on success.
+    async function sendConfig(port, cfg, { timeoutMs = 15000, log } = {}) {
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      const writer = port.writable.getWriter();
+      const reader = port.readable.getReader();
+      const deadline = Date.now() + timeoutMs;
+      let buf = '';
+      const lineQueue = [];
+      const pumpLines = (chunk) => {
+        buf += dec.decode(chunk, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i).replace(/\r$/, '');
+          buf = buf.slice(i + 1);
+          if (line) lineQueue.push(line);
+        }
+      };
+
+      // Drain any boot banter for ~750 ms so the device is in PROV-READY state.
+      const drainStart = Date.now();
+      while (Date.now() - drainStart < 750) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          new Promise(r => setTimeout(() => r({ value: undefined, done: false }), 100)),
+        ]);
+        if (done) break;
+        if (value) pumpLines(value);
+      }
+
+      const payload = '<<PROV ' + JSON.stringify(cfg) + '>>\n';
+      log?.('Sending config (' + payload.length + ' bytes)');
+      await writer.write(enc.encode(payload));
+
+      // Wait for OK / ERR.
+      while (Date.now() < deadline) {
+        if (lineQueue.length === 0) {
+          const { value, done } = await Promise.race([
+            reader.read(),
+            new Promise(r => setTimeout(() => r({ value: undefined, done: false }), 250)),
+          ]);
+          if (done) break;
+          if (value) pumpLines(value);
+          continue;
+        }
+        const line = lineQueue.shift();
+        log?.('< ' + line);
+        if (line === '<<PROV OK>>')      { writer.releaseLock(); reader.releaseLock(); return true; }
+        if (line.startsWith('<<PROV ERR')) { writer.releaseLock(); reader.releaseLock(); throw new Error(line); }
+      }
+      writer.releaseLock();
+      reader.releaseLock();
+      throw new Error('Timed out waiting for <<PROV OK>>');
+    }
+
+    async function provisionViaSerial({ wipeFirst } = {}) {
+      let cfg;
+      try { cfg = collectConfig(); }
+      catch (e) { setStatus(e.message, 'err'); return; }
+
+      if (!('serial' in navigator)) {
+        setStatus('Web Serial unavailable in this browser.', 'err');
+        return;
+      }
+
+      setStatus('Select the CYD serial port…');
+      let port;
+      try {
+        port = await navigator.serial.requestPort({});
+        await port.open({ baudRate: 250000 });
+      } catch (e) {
+        setStatus('Port selection cancelled.', 'warn');
+        return;
+      }
+
+      try {
+        if (wipeFirst) {
+          setStatus('Wiping existing config…');
+          const writer = port.writable.getWriter();
+          await writer.write(new TextEncoder().encode('<<PROV WIPE>>\n'));
+          writer.releaseLock();
+          // Device reboots — give it a moment to come back up in PROV mode.
+          await new Promise(r => setTimeout(r, 3000));
+        }
+
+        setStatus('Sending config to device…');
+        await sendConfig(port, cfg, { log: (m) => console.log('[prov]', m) });
+        setStatus('Config applied — device is rebooting into normal mode.', 'ok');
+      } catch (e) {
+        console.error(e);
+        setStatus('Provisioning failed: ' + e.message, 'err');
+      } finally {
+        try { await port.close(); } catch {}
+      }
+    }
+
+    // After the firmware install finishes, the same port can be re-opened to
+    // send the config blob.
+    document.querySelector('esp-web-install-button')
+      .addEventListener('state-changed', async (ev) => {
+        const s = ev.detail;
+        if (s.state === 'FINISHED') {
+          // Esp Web Tools releases the port on FINISHED. Wait briefly so the
+          // device boots into provisioning mode, then ask the user to pick the
+          // port again (browsers don't remember it across separate calls).
+          setStatus('Firmware flashed. Click Connect again to send your config.', 'ok');
+        } else if (s.state === 'ERROR') {
+          setStatus('Flash failed: ' + (s.message || 'unknown error'), 'err');
+        }
+      });
+
+    // The "Reconfigure only" button skips flashing.
+    $('#reprov').addEventListener('click', () => provisionViaSerial({ wipeFirst: false }));
+
+    // After flashing, show a single primary action that runs provisioning
+    // immediately. We keep both visible — flashing for a fresh device,
+    // reconfigure for an already-flashed one.
+    document.querySelector('esp-web-install-button')
+      .addEventListener('click', () => setStatus('Flashing… do not unplug the device.'));
+  </script>
+</body>
+</html>
