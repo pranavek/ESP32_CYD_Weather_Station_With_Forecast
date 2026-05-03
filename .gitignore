@@ -3,6 +3,3 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-
-# Flasher binaries are produced by the release workflow, never checked in.
-docs/flasher/*.bin

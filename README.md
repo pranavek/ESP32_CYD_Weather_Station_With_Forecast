@@ -1,14 +1,13 @@
 # ESP32 Cheap Yellow Display (CYD) Weather Station
 
-Based on the original by [AndroidCrypto](https://github.com/AndroidCrypto/ESP32_CYD_Weather_Station_With_Forecast), extended with a 2-page carousel, night mode, motivational quotes, and a browser-based webflasher that provisions WiFi/API/location/brightness over USB.
+Based on the original by [AndroidCrypto](https://github.com/AndroidCrypto/ESP32_CYD_Weather_Station_With_Forecast), extended with a 2-page carousel, night mode, and motivational quotes.
 
 ## Features
 
-- **Browser-based flashing** — connect over USB to a static webflasher page (Chrome/Edge); enter WiFi, API key, location, timezone, and brightness once and the page flashes the firmware *and* writes the config to NVS
 - **Current conditions** — weather icon (100×100 px), description, feels-like temperature, large temperature readout, wind speed + compass direction, barometric pressure with trend arrow
 - **Live clock** — HH:MM updated every minute via NTP (timezone + DST aware); header shows current date as `Www  Mmm D  YYYY`
 - **2-page bottom carousel** — cycles every 15 seconds between Page 1 (hourly forecast + astronomy) and Page 2 (4-day forecast + random quote)
-- **Fixed brightness** — set once via the webflasher (0–255), persisted in NVS
+- **Fixed brightness** — set via `#define SCREEN_BRIGHTNESS` in [src/All_Settings.h](src/All_Settings.h) (0–255, default 150)
 - **Night mode** — backlight cuts off at `NIGHT_OFF_HOUR:59` and restores at `NIGHT_ON_HOUR:00`
 - **Auto-refresh** — weather data fetched every 30 minutes; uses only the free OpenWeatherMap forecast endpoint
 
@@ -53,23 +52,34 @@ The bottom section cycles every 15 seconds between two pages.
 └─────────────────────────────┘  ↓ (320 px)
 ```
 
-## Getting Started — End user (webflasher)
+## Getting Started
 
 ### 1. Get an OpenWeatherMap API key
 
 Sign up for a free account at [openweathermap.org](https://openweathermap.org/). The free tier allows up to 1000 requests/day (~40/hour), which is well above the 30-minute update interval used here.
 
-### 2. Open the webflasher
+### 2. Configure `All_Settings.h`
 
-Open the GitHub Pages site in **Chrome or Edge** (Web Serial isn't available in Firefox or Safari):
+Edit [src/All_Settings.h](src/All_Settings.h):
 
-> https://pranavek.github.io/esp32-cyd-weather/flasher/
+```cpp
+#define WIFI_SSID      "your-network-name"
+#define WIFI_PASSWORD  "your-password"
 
-Plug the CYD into USB, fill in the form (SSID, password, API key, latitude, longitude, timezone, brightness), and click **Connect**. ESP Web Tools flashes the bootloader, partition table, firmware, and LittleFS image in one operation. After flashing finishes, click **Connect** again so the page can send your settings as a `<<PROV {…}>>` JSON line over the same USB connection. The device persists everything to NVS, reboots, and starts fetching weather.
+const String api_key = "your-openweathermap-api-key";
 
-To change a setting later, re-open the webflasher and either re-flash or click **Reconfigure only** to send a new config without re-flashing.
+// Set to at least 4 decimal places for accuracy
+const String latitude  = "40.749778527083656";
+const String longitude = "-73.98629815117553";
 
-**Available timezones** (selectable from the webflasher dropdown):
+#define TIMEZONE usCT   // see NTP_Time.h for all available zones
+
+const String units = "metric";  // or "imperial"
+
+#define SCREEN_BRIGHTNESS 150   // 0–255 fixed PWM level
+```
+
+**Available timezone references** (defined in [src/NTP_Time.h](src/NTP_Time.h)):
 
 | Reference | Zone |
 |-----------|------|
@@ -82,11 +92,11 @@ To change a setting later, re-open the webflasher and either re-flash or click *
 | `usAZ`    | Arizona (Mountain, no DST) |
 | `usPT`    | US Pacific (Los Angeles/Las Vegas) |
 
-To add a timezone not listed, add `TimeChangeRule` pairs to `NTP_Time.h`, an `extern` line in `Timezones.h`, a branch in `timezoneByName`, and an `<option>` in `docs/flasher/index.html`.
+To add a timezone not listed, add `TimeChangeRule` pairs to `NTP_Time.h` following the existing pattern.
 
-## Getting Started — Developer (PlatformIO)
+### 3. Install required libraries
 
-### 1. Install required libraries
+PlatformIO pulls these automatically from `lib_deps` in `platformio.ini`:
 
 | Library | Version | Source |
 |---------|---------|--------|
@@ -96,15 +106,14 @@ To add a timezone not listed, add `TimeChangeRule` pairs to `NTP_Time.h`, an `ex
 | TJpg_Decoder | 1.1.0+ | [Bodmer/TJpg_Decoder](https://github.com/Bodmer/TJpg_Decoder) |
 | Timezone | 1.2.4 | [JChristensen/Timezone](https://github.com/JChristensen/Timezone) |
 | Time | — | Arduino Library Manager (PaulStoffregen) |
-| ArduinoJson | 7.0+ | bblanchon/ArduinoJson — used by `Config::applyJson` to parse webflasher payloads |
 
 > **Note:** Compiler warnings about AVR/ESP32 architecture mismatch from the Timezone library are benign and can be ignored.
 
-### 2. Upload assets and flash
+### 4. Upload assets and flash
 
 The sketch and filesystem live in separate flash partitions — uploads are independent.
 
-> ⚠️ On a **brand new device**, upload the filesystem at least once before powering up — the sketch will hang on boot with "Flash FS initialisation failed!" if LittleFS has never been written. End users on the webflasher don't see this because both bins are flashed together.
+> ⚠️ On a **brand new device**, upload the filesystem at least once before powering up — the sketch will hang on boot with "Flash FS initialisation failed!" if LittleFS has never been written.
 
 **Step 1 — upload the filesystem** (only needed once, or when `data/` assets change):
 - VS Code: PlatformIO sidebar → Project Tasks → `esp32-cyd-st7789` → Platform → **Upload Filesystem Image**
@@ -113,16 +122,6 @@ The sketch and filesystem live in separate flash partitions — uploads are inde
 **Step 2 — flash the sketch** (any time code changes):
 - VS Code: Project Tasks → **Upload**
 - CLI: `pio run --target upload`
-
-### 3. Provisioning over serial
-
-A freshly flashed device with no NVS values enters provisioning mode. Open the serial monitor at 250000 baud — you should see `<<PROV READY>>`. Paste a single line:
-
-```
-<<PROV {"ssid":"my-wifi","pass":"secret","api_key":"abc…","lat":"40.7498","lon":"-73.9863","tz":"usET","brightness":150}>>
-```
-
-Expect `<<PROV OK>>` and a reboot. Send `<<PROV WIPE>>` at any time to clear NVS and re-enter provisioning mode.
 
 ## Using PlatformIO (VS Code)
 
@@ -194,13 +193,13 @@ build_flags =
 
 | Symptom | Fix |
 |---------|-----|
-| White/inverted colours | Add `tft.invertDisplay(true)` after `tft.begin()` — required for ST7789 panels |
+| White/inverted colours | Confirm `-DTFT_INVERSION_OFF` is in build_flags for the ST7789 panel |
 | Blank/garbled display | Verify the correct TFT_eSPI driver is set in `platformio.ini` build_flags |
-| Hangs on "Flash FS initialisation failed!" | LittleFS partition too small, or filesystem not yet uploaded (run Step 1 above; webflasher does this automatically) |
-| Weather data shows "Failed to get data points" | Check API key and lat/long via the webflasher; verify WiFi via Serial monitor at 250000 baud |
+| Hangs on "Flash FS initialisation failed!" | LittleFS partition too small, or filesystem not yet uploaded (run Step 1 above) |
+| Weather data shows "Failed to get data points" | Check API key and lat/long in `All_Settings.h`; verify WiFi via Serial monitor at 250000 baud |
 | Corrupted filesystem after failed upload | Uncomment `#define FORMAT_LittleFS` in the main `.ino`, flash once to wipe, then re-comment and re-upload |
-| Time shows wrong zone | Re-run the webflasher and pick a different timezone, or send `<<PROV WIPE>>` and re-provision over serial |
-| Brightness too dim or too bright | Re-run the webflasher and adjust the brightness slider (0–255), or use **Reconfigure only** to push the new value without re-flashing |
+| Time shows wrong zone | Ensure `#define TIMEZONE` in `All_Settings.h` matches a zone defined in `NTP_Time.h` |
+| Brightness too dim or too bright | Adjust `#define SCREEN_BRIGHTNESS` in `All_Settings.h` (0–255) and re-flash |
 
 ## Debug Options
 
@@ -222,4 +221,4 @@ espressif32 platform (arduino-esp32 boards 3.2.0)  https://github.com/espressif/
 
 ## Credits
 
-Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Extended for the CYD platform with moon phase display, barometric pressure, cloud cover, humidity, and forecast strip by [AndroidCrypto](https://github.com/AndroidCrypto). Further extended with a 2-page carousel, night mode, feels-like temperature, pressure trend arrow, motivational quotes, and a browser-based webflasher with NVS provisioning by [Pranav E K](https://github.com/pranavek).
+Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Extended for the CYD platform with moon phase display, barometric pressure, cloud cover, humidity, and forecast strip by [AndroidCrypto](https://github.com/AndroidCrypto). Further extended with a 2-page carousel, night mode, feels-like temperature, pressure trend arrow, and motivational quotes by [Pranav E K](https://github.com/pranavek).
