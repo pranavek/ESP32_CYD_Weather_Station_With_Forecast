@@ -5,8 +5,9 @@
   The weather data is retrieved from OpenWeatherMap.org service and you need to get your own 
   (free) API key before running the sketch.
 
-  Please add the key, your Wi-Fi credentials, the location coordinates for the weather information and 
-  additional data about your Timezone in the settings file: 'All_Settings.h'.
+  WiFi credentials, OpenWeatherMap key, location, timezone, and brightness are entered through the
+  webflasher page in docs/flasher/ and persisted to NVS at first boot. The values in All_Settings.h
+  are compile-time fallbacks only.
 
   The code is not written by me, but from Daniel Eichhorn (https://blog.squix.ch) and was 
   adapted by Bodmer as an example for his OpenWeather library (https://github.com/Bodmer/OpenWeather/).
@@ -91,7 +92,7 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 #endif
 
 
-// check All_Settings.h for adapting to your needs
+// Compile-time defaults. Runtime values come from Config (NVS).
 #include "All_Settings.h"
 
 #include <JSON_Decoder.h>  // https://github.com/Bodmer/JSON_Decoder
@@ -100,6 +101,9 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 
 #include "NTP_Time.h"  // Attached to this sketch, see that tab for library needs
 // Time zone correction library: https://github.com/JChristensen/Timezone
+
+#include "Config.h"
+#include "Provisioning.h"
 
 /***************************************************************************************
 **                          Define the globals and class instances
@@ -159,7 +163,7 @@ void drawTime();
 void drawCurrentWeather();
 void drawForecast();
 void drawForecastDetail(uint16_t x, uint16_t y, uint8_t dayIndex);
-const char* getMeteoconIcon(uint16_t id, bool today);
+const char* getMeteoconIcon(uint16_t id, time_t when);
 void drawAstronomy();
 void drawSeparator(uint16_t y);
 void fillSegment(int x, int y, int start_angle, int sub_angle, int r, unsigned int colour);
@@ -201,10 +205,15 @@ void setup() {
   tft.setRotation(2);  // 180° portrait
   tft.fillScreen(TFT_BLACK);
 
-  // PWM backlight on TFT_BL — controls brightness via SCREEN_BRIGHTNESS
+  // PWM backlight on TFT_BL — fixed level from Config (set via webflasher).
   ledcSetup(0, 5000, 8);          // channel 0, 5 kHz, 8-bit
   ledcAttachPin(TFT_BL, 0);
-  setBacklight(SCREEN_BRIGHTNESS);
+  Config::begin();
+  if (!Config::isProvisioned()) {
+    setBacklight(Config::brightness());
+    Provisioning::run(tft);  // never returns
+  }
+  setBacklight(Config::brightness());
 
   if (!LittleFS.begin()) {
     Serial.println("Flash FS initialisation failed!");
@@ -252,13 +261,13 @@ void setup() {
 
 // Call once for ESP32 and ESP8266
 #if !defined(ARDUINO_ARCH_MBED)
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(Config::wifiSsid(), Config::wifiPassword());
 #endif
 
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
 #if defined(ARDUINO_ARCH_MBED) || defined(ARDUINO_ARCH_RP2040)
-    if (WiFi.status() != WL_CONNECTED) WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    if (WiFi.status() != WL_CONNECTED) WiFi.begin(Config::wifiSsid(), Config::wifiPassword());
 #endif
     delay(500);
   }
@@ -280,7 +289,9 @@ void setup() {
 **                          Loop
 ***************************************************************************************/
 void loop() {
-  time_t local_t = TIMEZONE.toLocal(now(), &tz1_Code);
+  Provisioning::pollWipe();
+
+  time_t local_t = Config::timezone()->toLocal(now(), &tz1_Code);
   uint8_t h = hour(local_t);
   uint8_t m = minute(local_t);
   bool nightMode = !booted &&
@@ -338,18 +349,19 @@ void updateData() {
   // Create the structure that holds the retrieved weather
   forecast = new OW_forecast;
 
+  String lat = Config::latitude();
+  String lon = Config::longitude();
+
 #ifdef RANDOM_LOCATION  // Randomly choose a place on Earth to test icons etc
-  String latitude = "";
-  latitude = (random(180) - 90);
-  String longitude = "";
-  longitude = (random(360) - 180);
+  lat = String(random(180) - 90);
+  lon = String(random(360) - 180);
   Serial.print("Lat = ");
-  Serial.print(latitude);
+  Serial.print(lat);
   Serial.print(", Lon = ");
-  Serial.println(longitude);
+  Serial.println(lon);
 #endif
 
-  bool parsed = ow.getForecast(forecast, api_key, latitude, longitude, units, language);
+  bool parsed = ow.getForecast(forecast, Config::apiKey(), lat, lon, units, language);
 
   if (parsed) Serial.println("Data points received");
   else Serial.println("Failed to get data points");
@@ -421,7 +433,7 @@ void drawProgress(uint8_t percentage, String text) {
 void drawTime() {
   // Date — redraws every minute so midnight crossover is always correct
   tft.loadFont(AA_FONT_SMALL, LittleFS);
-  time_t local_time = TIMEZONE.toLocal(now(), &tz1_Code);
+  time_t local_time = Config::timezone()->toLocal(now(), &tz1_Code);
   String date = String(dayShortStr(weekday(local_time))) + "  " +
                 String(monthShortStr(month(local_time))) + " " +
                 String(day(local_time)) + "  " +
@@ -435,7 +447,7 @@ void drawTime() {
   tft.loadFont(AA_FONT_LARGE, LittleFS);
 
   // Convert UTC to local time, returns zone code in tz1_Code, e.g "GMT"
-  local_time = TIMEZONE.toLocal(now(), &tz1_Code);
+  local_time = Config::timezone()->toLocal(now(), &tz1_Code);
 
   String timeNow = "";
 
@@ -468,7 +480,7 @@ void drawCurrentWeather() {
   String currentSummary = forecast->main[0];
   currentSummary.toLowerCase();
 
-  weatherIcon = getMeteoconIcon(forecast->id[0], true);
+  weatherIcon = getMeteoconIcon(forecast->id[0], now());
 
   ui.drawBmp("/icon/" + weatherIcon + ".bmp", 0, 53);
 
@@ -567,7 +579,7 @@ void drawForecastDetail(uint16_t x, uint16_t y, uint8_t slotIndex) {
   tft.setTextPadding(tft.textWidth(" -88 "));
   tft.drawString(String(s.temp, 0), x + 25, y + 17);
 
-  String weatherIcon = getMeteoconIcon(s.id, false);
+  String weatherIcon = getMeteoconIcon(s.id, s.dt);
   ui.drawBmp("/icon50/" + weatherIcon + ".bmp", x, y + 18);
 
   tft.setTextPadding(0);
@@ -625,9 +637,14 @@ void drawAstronomy() {
 /***************************************************************************************
 **                          Get the icon file name from the index number
 ***************************************************************************************/
-const char* getMeteoconIcon(uint16_t id, bool today) {
-  // if ( today && id/100 == 8 && (forecast->dt[0] < forecast->sunrise || forecast->dt[0] > forecast->sunset)) id += 1000;
-  if (today && id / 100 == 8 && cachedSunrise > 0 && (now() < cachedSunrise || now() > cachedSunset)) id += 1000;
+const char* getMeteoconIcon(uint16_t id, time_t when) {
+  // Night offset uses the time-of-day of `when` vs today's sunrise/sunset, so
+  // forecast slots in the next few days resolve to night icons after sunset.
+  if (id / 100 == 8 && cachedSunrise > 0) {
+    auto sod = [](time_t t) { return hour(t) * 3600 + minute(t) * 60 + second(t); };
+    long s = sod(when), sr = sod(cachedSunrise), ss = sod(cachedSunset);
+    if (s < sr || s > ss) id += 1000;
+  }
   // see issue https://github.com/Bodmer/OpenWeather/issues/26
   if (id / 100 == 2) return "thunderstorm";
   if (id / 100 == 3) return "drizzle";
@@ -747,22 +764,7 @@ void setBacklight(uint8_t level) {
 }
 
 void updateBrightness(bool nightMode) {
-  if (nightMode) { setBacklight(0); return; }
-#ifdef AUTO_BRIGHTNESS
-  static uint8_t  current    = SCREEN_BRIGHTNESS;
-  static uint32_t lastUpdate = 0;
-  if (millis() - lastUpdate < 10000UL) return;  // sample every 10 seconds
-  lastUpdate = millis();
-  int raw = 0;
-  for (int i = 0; i < 8; i++) raw += analogRead(LDR_PIN);
-  raw >>= 3;  // average 8 readings
-  int target = map(raw, 0, 4095, LDR_MIN_BRIGHT, SCREEN_BRIGHTNESS);
-  target = constrain(target, (int)LDR_MIN_BRIGHT, (int)SCREEN_BRIGHTNESS);
-  current = (uint8_t)((current * 7 + target) / 8);  // EMA, α≈0.125
-  setBacklight(current);
-#else
-  setBacklight(SCREEN_BRIGHTNESS);
-#endif
+  setBacklight(nightMode ? 0 : Config::brightness());
 }
 
 /***************************************************************************************
@@ -791,14 +793,14 @@ void cacheForecastData(void) {
     dayCache[d].id   = 0;
     dayCache[d].pop  = 0.0f;
   }
-  time_t nowLocal = TIMEZONE.toLocal(now(), &tz1_Code);
+  time_t nowLocal = Config::timezone()->toLocal(now(), &tz1_Code);
   int todayDay = day(nowLocal);
   int filled = 0;
   int lastDayKey = todayDay;
   int dayBestSlotIdx = -1;
   uint8_t dayBestHourDist = 24;
   for (int i = 0; i < MAX_DAYS * 8 && filled < 4; i++) {
-    time_t local = TIMEZONE.toLocal(forecast->dt[i], &tz1_Code);
+    time_t local = Config::timezone()->toLocal(forecast->dt[i], &tz1_Code);
     int dKey = day(local);
     if (dKey == todayDay) continue;
     if (filled == 0 || dKey != lastDayKey) {
@@ -835,7 +837,7 @@ void cacheForecastData(void) {
   cachedHumidity   = forecast->humidity[0];
   cachedClouds     = forecast->clouds_all[0];
   // Moon
-  time_t local0 = TIMEZONE.toLocal(forecast->dt[0], &tz1_Code);
+  time_t local0 = Config::timezone()->toLocal(forecast->dt[0], &tz1_Code);
   int ip;
   cachedMoonIcon     = moon_phase(year(local0), month(local0), day(local0), hour(local0), &ip);
   cachedMoonPhaseIdx = ip;
@@ -933,7 +935,8 @@ void drawDailyForecast(void) {
     tft.setTextPadding(tft.textWidth("-88/-88"));
     tft.drawString(String(d.high, 0) + "/" + String(d.low, 0), x + 25, y + 17);
 
-    String icon = getMeteoconIcon(d.id, false);
+    // Daily column — always render the day icon by sampling midday.
+    String icon = getMeteoconIcon(d.id, (cachedSunrise + cachedSunset) / 2);
     ui.drawBmp("/icon50/" + icon + ".bmp", x, y + 18);
   }
   tft.setTextPadding(0);
@@ -1022,7 +1025,7 @@ void printWeather(void) {
 **             Convert Unix time to a "local time" time string "12:34"
 ***************************************************************************************/
 String strTime(time_t unixTime) {
-  time_t local_time = TIMEZONE.toLocal(unixTime, &tz1_Code);
+  time_t local_time = Config::timezone()->toLocal(unixTime, &tz1_Code);
 
   String localTime = "";
 
@@ -1039,7 +1042,7 @@ String strTime(time_t unixTime) {
 **  Convert Unix time to a local date + time string "Oct 16 17:18", ends with newline
 ***************************************************************************************/
 String strDate(time_t unixTime) {
-  time_t local_time = TIMEZONE.toLocal(unixTime, &tz1_Code);
+  time_t local_time = Config::timezone()->toLocal(unixTime, &tz1_Code);
 
   String localDate = "";
 
