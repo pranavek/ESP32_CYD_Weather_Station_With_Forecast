@@ -1,57 +1,19 @@
 /*
-  The sketch is displaying a nice Internet Weather Station with 3 4 days forecast on an
-  ESP32-Cheap Yellow Display (CYD) with 2.8-inch TFT display and 320x240 pixels resolution.
+  Internet Weather Station for the ESP32 "Cheap Yellow Display" (CYD) — 2.8" TFT, 320x240.
 
-  The weather data is retrieved from OpenWeatherMap.org service and you need to get your own 
-  (free) API key before running the sketch.
+  Weather data is fetched from Open-Meteo (https://open-meteo.com/) — no API key required.
+  Configure Wi-Fi credentials, location lat/lon, units, and timezone in 'All_Settings.h'.
 
-  Please add the key, your Wi-Fi credentials, the location coordinates for the weather information and
-  additional data about your Timezone in the settings file: 'All_Settings.h'.
+  Originally by Daniel Eichhorn (https://blog.squix.ch); adapted by Bodmer for the
+  OpenWeatherMap library, then ported to Open-Meteo. See license at end of file.
 
-  The code is not written by me, but from Daniel Eichhorn (https://blog.squix.ch) and was 
-  adapted by Bodmer as an example for his OpenWeather library (https://github.com/Bodmer/OpenWeather/).
+  The code is optimized for the 'ESP32-2432S028R' CYD variant (240x320, portrait orientation).
 
-  I changed lines of code to crrect some issues, for more information see: https://github.com/Bodmer/OpenWeather/issues/26
-  1):
-  Search for: String date = "Updated: " + strDate(local_time); 
-  Change to:  String date = "Updated: " + strDate(now());
-  2)
-  Search for: if ( today && id/100 == 8 && (forecast->dt[0] < forecast->sunrise || forecast->dt[0] > forecast->sunset)) id += 1000;
-  Change to:  if ( today && id/100 == 8 && (now() < forecast->sunrise || now() > forecast->sunset)) id += 1000;
+  Weather icons and fonts live on LittleFS in the 'data/' subfolder — upload the filesystem
+  image before flashing the sketch (see README). LittleFS partition must be >= 1.5 MB.
 
-  The code is optimized to run on the Cheap Yellow Display ('CYD') with a screen resolution of 320 x 240 pixels in Landscape
-  orientation, that is the 'ESP32-2432S028R' variant.
-
-  The weather icons and fonts are stored in ESP32's LittleFS filesystem, so you need to upload the files in the 'data' subfolder
-  first before uploading the code and starting the device.
-  See 'Upload_To_LittleFS.md' for more details about this.
-
-              >>>       IMPORTANT TO PREVENT CRASHES      <<<
-  >>>>>>  Set LittleFS to at least 1.5Mbytes before uploading files  <<<<<<  
-
-  The sketch is using the TFT_eSPI library by Bodmer (https://github.com/Bodmer/TFT_eSPI), so please select the correct
-  'User_Setups' file in the library folder. I prepare two files (see my GitHub Repository) that should work:
-  For older device with one USB connector (chip driver ILI9341) use: 
-    Setup801_ESP32_CYD_ILI9341_240x320.h
-  New devices with two USB connectors (chip driver ST7789) require:
-    Setup805_ESP32_CYD_ST7789_240x320.h
-
-  Original by Daniel Eichhorn, see license at end of file.
-
-*/
-
-/*
-  This sketch uses font files created from the Noto family of fonts as bitmaps
-  generated from these fonts may be freely distributed:
-  https://www.google.com/get/noto/
-
-  A processing sketch to create new fonts can be found in the Tools folder of TFT_eSPI
-  https://github.com/Bodmer/TFT_eSPI/tree/master/Tools/Create_Smooth_Font/Create_font
-  New fonts can be generated to include language specific characters. The Noto family
-  of fonts has an extensive character set coverage.
-
-  Json streaming parser (do not use IDE library manager version) to use is here:
-  https://github.com/Bodmer/JSON_Decoder
+  Fonts were generated from the Noto family (https://www.google.com/get/noto/).
+  JSON parsing uses ArduinoJson (https://arduinojson.org/).
 */
 
 #define SERIAL_MESSAGES  // For serial output weather reports
@@ -59,7 +21,7 @@
 //#define RANDOM_LOCATION // Test only, selects random weather location every refresh
 //#define FORMAT_LittleFS   // Wipe LittleFS and all files!
 
-const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
+const char* PROGRAM_VERSION = "ESP32 CYD Open-Meteo LittleFS V03";
 
 #include <FS.h>
 #include <LittleFS.h>
@@ -94,9 +56,9 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 // User-facing settings.
 #include "All_Settings.h"
 
-#include <JSON_Decoder.h>  // https://github.com/Bodmer/JSON_Decoder
-
-#include <OpenWeather.h>  // Latest here: https://github.com/Bodmer/OpenWeather
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>  // https://arduinojson.org/
 
 #include "NTP_Time.h"  // Attached to this sketch, see that tab for library needs
 // Time zone correction library: https://github.com/JChristensen/Timezone
@@ -108,9 +70,40 @@ const char* PROGRAM_VERSION = "ESP32 CYD OpenWeatherMap LittleFS V02";
 
 TFT_eSPI tft = TFT_eSPI();  // Invoke custom library
 
-OW_Weather ow;  // Weather forecast library instance
+// Open-Meteo response, parsed into the fields we use. Heap-allocated each
+// updateData() call and freed at the end, like the old OW_forecast.
+struct OMForecast {
+  // Current conditions
+  uint16_t code;
+  float    temp;
+  float    feels_like;
+  uint8_t  humidity;
+  float    pressure;       // hPa
+  float    wind_speed;
+  uint16_t wind_deg;
+  uint8_t  clouds;         // %
+  uint32_t visibility;     // m
 
-OW_forecast* forecast;
+  // Hourly forecast — 16h ahead, 1h spacing. Indices 0/3/6/9 give the next
+  // four 3-hour-spaced slots used by the bottom forecast strip.
+  static const int HOURLY_COUNT = 16;
+  time_t   hourly_dt[HOURLY_COUNT];
+  uint16_t hourly_code[HOURLY_COUNT];
+  float    hourly_temp[HOURLY_COUNT];
+  uint8_t  hourly_pop[HOURLY_COUNT];      // %
+
+  // Daily forecast — today (index 0) + next 4 days
+  static const int DAILY_COUNT = 5;
+  time_t   daily_dt[DAILY_COUNT];
+  uint16_t daily_code[DAILY_COUNT];
+  float    daily_max[DAILY_COUNT];
+  float    daily_min[DAILY_COUNT];
+  uint8_t  daily_pop_max[DAILY_COUNT];    // %
+  time_t   daily_sunrise[DAILY_COUNT];
+  time_t   daily_sunset[DAILY_COUNT];
+};
+
+OMForecast* forecast;
 
 boolean booted = true;
 
@@ -160,17 +153,18 @@ void drawTime();
 void drawCurrentWeather();
 void drawForecast();
 void drawForecastDetail(uint16_t x, uint16_t y, uint8_t dayIndex);
-const char* getMeteoconIcon(uint16_t id, time_t when);
+const char* getMeteoconIcon(uint16_t code, time_t when);
+const char* weatherCodeLabel(uint16_t code);
 void drawAstronomy();
 void drawSeparator(uint16_t y);
 void fillSegment(int x, int y, int start_angle, int sub_angle, int r, unsigned int colour);
 String strDate(time_t unixTime);
 String strTime(time_t unixTime);
 void printWeather(void);
+bool fetchOpenMeteo(OMForecast* f);
 int leftOffset(String text, String sub);
 int rightOffset(String text, String sub);
 int splitIndex(String text);
-int getNextSlotIndex(void);
 void cacheForecastData(void);
 uint8_t moon_phase(int year, int month, int day, double hour, int* ip);
 void drawBottomSections(void);
@@ -337,7 +331,7 @@ void updateData() {
   else fillSegment(22, 22, 0, (int)(50 * 3.6), 16, TFT_NAVY);
 
   // Create the structure that holds the retrieved weather
-  forecast = new OW_forecast;
+  forecast = new OMForecast;
 
   String lat = latitude;
   String lon = longitude;
@@ -351,7 +345,7 @@ void updateData() {
   Serial.println(lon);
 #endif
 
-  bool parsed = ow.getForecast(forecast, api_key, lat, lon, units, language);
+  bool parsed = fetchOpenMeteo(forecast);
 
   if (parsed) Serial.println("Data points received");
   else Serial.println("Failed to get data points");
@@ -388,7 +382,7 @@ void updateData() {
     tft.setTextPadding(tft.textWidth(" -88"));  // Max width of values
 
     String weatherText = "";
-    weatherText = String(forecast->temp[0], 0);  // Make it integer temperature
+    weatherText = String(forecast->temp, 0);     // Make it integer temperature
     tft.drawString(weatherText, 215, 95);        //  + "°" symbol is big... use o in small font
     tft.unloadFont();
   } else {
@@ -467,18 +461,12 @@ void drawCurrentWeather() {
   String weatherText = "None";
   String weatherIcon = "";
 
-  String currentSummary = forecast->main[0];
-  currentSummary.toLowerCase();
-
-  weatherIcon = getMeteoconIcon(forecast->id[0], now());
+  weatherIcon = getMeteoconIcon(forecast->code, now());
 
   ui.drawBmp("/icon/" + weatherIcon + ".bmp", 0, 53);
 
-  // Weather Text
-  if (language == "en")
-    weatherText = forecast->main[0];
-  else
-    weatherText = forecast->description[0];
+  // Weather text — derived from the WMO weather code (Open-Meteo doesn't ship a label).
+  weatherText = weatherCodeLabel(forecast->code);
 
   tft.setTextDatum(BR_DATUM);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
@@ -491,7 +479,7 @@ void drawCurrentWeather() {
   tft.drawString(splitPoint ? weatherText.substring(0, splitPoint) : weatherText, xpos, 69);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("feels " + String(forecast->feels_like[0], 0) + "o", xpos, 86);
+  tft.drawString("feels " + String(forecast->feels_like, 0) + "o", xpos, 86);
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
 
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -503,7 +491,7 @@ void drawCurrentWeather() {
   //Temperature large digits added in updateData() to save swapping font here
 
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-  weatherText = String(forecast->wind_speed[0], 0);
+  weatherText = String(forecast->wind_speed, 0);
 
   if (units == "metric") weatherText += " m/s";
   else weatherText += " mph";
@@ -512,7 +500,7 @@ void drawCurrentWeather() {
   tft.setTextPadding(tft.textWidth("888 m/s"));  // Max string length?
   tft.drawString(weatherText, 124, 136);
 
-  float curPressure = forecast->pressure[0];
+  float curPressure = forecast->pressure;
   if (units == "imperial") {
     weatherText = String(curPressure, 2) + " in";
   } else {
@@ -528,7 +516,7 @@ void drawCurrentWeather() {
   tft.setTextPadding(tft.textWidth(" 8888hPa^"));
   tft.drawString(weatherText, 230, 136);
 
-  int windAngle = (forecast->wind_deg[0] + 22.5) / 45;
+  int windAngle = (forecast->wind_deg + 22.5) / 45;
   if (windAngle > 7) windAngle = 0;
   String wind[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
   ui.drawBmp("/wind/" + wind[windAngle] + ".bmp", 101, 86);
@@ -627,41 +615,86 @@ void drawAstronomy() {
 /***************************************************************************************
 **                          Get the icon file name from the index number
 ***************************************************************************************/
-const char* getMeteoconIcon(uint16_t id, time_t when) {
-  // Night offset uses the time-of-day of `when` vs today's sunrise/sunset, so
-  // forecast slots in the next few days resolve to night icons after sunset.
-  if (id / 100 == 8 && cachedSunrise > 0) {
-    // All three values are UTC; we compare seconds-of-day. When local sunset
-    // crosses midnight UTC the day window wraps (sr > ss), so handle that
-    // case explicitly — otherwise daytime hours after the ss-wrap test as night.
+// Maps an Open-Meteo WMO weather code to a bitmap name in /icon/ or /icon50/.
+// Day/night detection only matters for clear & partly-cloudy codes (0/1/2);
+// everything else uses one icon regardless of time of day.
+const char* getMeteoconIcon(uint16_t code, time_t when) {
+  bool isNight = false;
+  if (code <= 2 && cachedSunrise > 0) {
+    // Compare seconds-of-day in UTC. When local sunset crosses midnight UTC
+    // the day window wraps (sr > ss), so handle that case explicitly —
+    // otherwise daytime hours after the ss-wrap test as night.
     auto sod = [](time_t t) { return hour(t) * 3600 + minute(t) * 60 + second(t); };
     long s = sod(when), sr = sod(cachedSunrise), ss = sod(cachedSunset);
     bool isDay = (sr <= ss) ? (s >= sr && s <= ss)
                             : (s >= sr || s <= ss);
-    if (!isDay) id += 1000;
+    isNight = !isDay;
   }
-  // see issue https://github.com/Bodmer/OpenWeather/issues/26
-  if (id / 100 == 2) return "thunderstorm";
-  if (id / 100 == 3) return "drizzle";
-  if (id / 100 == 4) return "unknown";
-  if (id == 500) return "lightRain";
-  else if (id == 511) return "sleet";
-  else if (id / 100 == 5) return "rain";
-  if (id >= 611 && id <= 616) return "sleet";
-  else if (id / 100 == 6) return "snow";
-  if (id / 100 == 7) return "fog";
-  if (id == 800) return "clear-day";
-  if (id == 801) return "partly-cloudy-day";
-  if (id == 802) return "cloudy";
-  if (id == 803) return "cloudy";
-  if (id == 804) return "cloudy";
-  if (id == 1800) return "clear-night";
-  if (id == 1801) return "partly-cloudy-night";
-  if (id == 1802) return "cloudy";
-  if (id == 1803) return "cloudy";
-  if (id == 1804) return "cloudy";
+  switch (code) {
+    case 0:  // Clear sky
+    case 1:  // Mainly clear
+      return isNight ? "clear-night" : "clear-day";
+    case 2:  // Partly cloudy
+      return isNight ? "partly-cloudy-night" : "partly-cloudy-day";
+    case 3:  // Overcast
+      return "cloudy";
+    case 45: case 48:                       // Fog / rime fog
+      return "fog";
+    case 51: case 53: case 55:              // Drizzle
+      return "drizzle";
+    case 56: case 57:                       // Freezing drizzle
+    case 66: case 67:                       // Freezing rain
+      return "sleet";
+    case 61:                                // Slight rain
+    case 80: case 81:                       // Slight/moderate rain showers
+      return "lightRain";
+    case 63: case 65:                       // Moderate / heavy rain
+    case 82:                                // Violent rain showers
+      return "rain";
+    case 71: case 73: case 75: case 77:     // Snow / snow grains
+    case 85: case 86:                       // Snow showers
+      return "snow";
+    case 95: case 96: case 99:              // Thunderstorm (with hail)
+      return "thunderstorm";
+    default:
+      return "unknown";
+  }
+}
 
-  return "unknown";
+// Short text label per WMO code, used where OWM previously supplied
+// `main`/`description`. Kept under ~14 chars so splitIndex() can wrap on a space.
+const char* weatherCodeLabel(uint16_t code) {
+  switch (code) {
+    case 0:  return "Clear";
+    case 1:  return "Mainly clear";
+    case 2:  return "Partly cloudy";
+    case 3:  return "Overcast";
+    case 45: return "Fog";
+    case 48: return "Rime fog";
+    case 51: return "Light drizzle";
+    case 53: return "Drizzle";
+    case 55: return "Heavy drizzle";
+    case 56:
+    case 57: return "Frz drizzle";
+    case 61: return "Light rain";
+    case 63: return "Rain";
+    case 65: return "Heavy rain";
+    case 66:
+    case 67: return "Frz rain";
+    case 71: return "Light snow";
+    case 73: return "Snow";
+    case 75: return "Heavy snow";
+    case 77: return "Snow grains";
+    case 80:
+    case 81: return "Rain shower";
+    case 82: return "Heavy shower";
+    case 85:
+    case 86: return "Snow shower";
+    case 95: return "Thunder";
+    case 96:
+    case 99: return "Thunder hail";
+    default: return "Unknown";
+  }
 }
 
 /***************************************************************************************
@@ -741,14 +774,108 @@ void fillSegment(int x, int y, int start_angle, int sub_angle, int r, unsigned i
 }
 
 /***************************************************************************************
-**                          Get 3 hourly index at start of next day
+**                          Open-Meteo HTTPS fetch + JSON parse
 ***************************************************************************************/
-int getNextSlotIndex(void) {
-  time_t t = now();
-  for (int i = 0; i < MAX_DAYS * 8; i++) {
-    if (forecast->dt[i] > t) return i;
+bool fetchOpenMeteo(OMForecast* f) {
+  // Build the request URL. timeformat=unixtime gives us time_t directly;
+  // timezone=auto lets the API bucket daily.* by local-day boundaries for the
+  // configured lat/lon (sunrise/sunset remain absolute unix moments either way).
+  String url = "https://api.open-meteo.com/v1/forecast"
+               "?latitude=" + latitude +
+               "&longitude=" + longitude +
+               "&current=temperature_2m,apparent_temperature,relative_humidity_2m,pressure_msl,wind_speed_10m,wind_direction_10m,cloud_cover,weather_code,visibility"
+               "&hourly=temperature_2m,weather_code,precipitation_probability"
+               "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max"
+               "&timeformat=unixtime"
+               "&timezone=auto"
+               "&forecast_days=5";
+  if (units == "imperial") {
+    url += "&temperature_unit=fahrenheit&wind_speed_unit=mph";
+  } else {
+    url += "&wind_speed_unit=ms";
   }
-  return 0;
+
+  WiFiClientSecure client;
+  client.setInsecure();   // Open-Meteo uses LE certs; skipping validation matches
+                          // typical CYD weather-display practice.
+  HTTPClient http;
+  http.setTimeout(10000);
+  if (!http.begin(client, url)) {
+    Serial.println("HTTPClient.begin() failed");
+    return false;
+  }
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("HTTP GET failed: %d\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) {
+    Serial.print("JSON parse failed: ");
+    Serial.println(err.c_str());
+    return false;
+  }
+
+  // Current
+  JsonObject cur = doc["current"];
+  f->code        = cur["weather_code"]         | 0;
+  f->temp        = cur["temperature_2m"]       | 0.0f;
+  f->feels_like  = cur["apparent_temperature"] | 0.0f;
+  f->humidity    = cur["relative_humidity_2m"] | 0;
+  f->pressure    = cur["pressure_msl"]         | 0.0f;
+  f->wind_speed  = cur["wind_speed_10m"]       | 0.0f;
+  f->wind_deg    = cur["wind_direction_10m"]   | 0;
+  f->clouds      = cur["cloud_cover"]          | 0;
+  f->visibility  = cur["visibility"]           | 0;
+
+  // Hourly — find first index where time > now, then capture HOURLY_COUNT entries.
+  JsonArray h_time = doc["hourly"]["time"];
+  JsonArray h_code = doc["hourly"]["weather_code"];
+  JsonArray h_temp = doc["hourly"]["temperature_2m"];
+  JsonArray h_pop  = doc["hourly"]["precipitation_probability"];
+  time_t nowT = now();
+  int startIdx = 0;
+  for (int i = 0; i < (int)h_time.size(); i++) {
+    if ((time_t)h_time[i].as<long>() > nowT) { startIdx = i; break; }
+  }
+  for (int i = 0; i < OMForecast::HOURLY_COUNT; i++) {
+    int j = startIdx + i;
+    if (j >= (int)h_time.size()) {
+      f->hourly_dt[i] = 0;
+      continue;
+    }
+    f->hourly_dt[i]   = (time_t)h_time[j].as<long>();
+    f->hourly_code[i] = h_code[j].as<int>();
+    f->hourly_temp[i] = h_temp[j].as<float>();
+    f->hourly_pop[i]  = h_pop[j].isNull() ? 0 : (uint8_t)h_pop[j].as<int>();
+  }
+
+  // Daily — index 0 is today; cacheForecastData() skips it for the 4-day strip.
+  JsonArray d_time    = doc["daily"]["time"];
+  JsonArray d_code    = doc["daily"]["weather_code"];
+  JsonArray d_max     = doc["daily"]["temperature_2m_max"];
+  JsonArray d_min     = doc["daily"]["temperature_2m_min"];
+  JsonArray d_sunrise = doc["daily"]["sunrise"];
+  JsonArray d_sunset  = doc["daily"]["sunset"];
+  JsonArray d_pop     = doc["daily"]["precipitation_probability_max"];
+  for (int i = 0; i < OMForecast::DAILY_COUNT; i++) {
+    if (i >= (int)d_time.size()) {
+      f->daily_dt[i] = 0;
+      continue;
+    }
+    f->daily_dt[i]      = (time_t)d_time[i].as<long>();
+    f->daily_code[i]    = d_code[i].as<int>();
+    f->daily_max[i]     = d_max[i].as<float>();
+    f->daily_min[i]     = d_min[i].as<float>();
+    f->daily_sunrise[i] = (time_t)d_sunrise[i].as<long>();
+    f->daily_sunset[i]  = (time_t)d_sunset[i].as<long>();
+    f->daily_pop_max[i] = d_pop[i].isNull() ? 0 : (uint8_t)d_pop[i].as<int>();
+  }
+  return true;
 }
 
 /***************************************************************************************
@@ -766,73 +893,43 @@ void updateBrightness(bool nightMode) {
 **                          Cache forecast data before forecast pointer is freed
 ***************************************************************************************/
 void cacheForecastData(void) {
-  // Slot cache: next 4 three-hour slots
-  int start = getNextSlotIndex();
+  // Slot cache: next 4 three-hour-spaced slots, sampled from the 1h-spaced
+  // hourly array at indices 0/3/6/9 (fetchOpenMeteo already aligned index 0
+  // to "first hour after now").
   for (int i = 0; i < 4; i++) {
-    int idx = start + i;
-    if (idx < MAX_DAYS * 8) {
-      slotCache[i].dt   = forecast->dt[idx];
-      slotCache[i].temp = forecast->temp[idx];
-      slotCache[i].id   = forecast->id[idx];
-      slotCache[i].pop  = forecast->pop[idx];
+    int idx = i * 3;
+    if (idx < OMForecast::HOURLY_COUNT && forecast->hourly_dt[idx] != 0) {
+      slotCache[i].dt   = forecast->hourly_dt[idx];
+      slotCache[i].temp = forecast->hourly_temp[idx];
+      slotCache[i].id   = forecast->hourly_code[idx];
+      slotCache[i].pop  = forecast->hourly_pop[idx] / 100.0f;
     } else {
       slotCache[i].dt = 0;
     }
   }
 
-  // Day cache: aggregate by calendar day, skip today, take next 4 days
+  // Day cache: skip today (index 0), take next 4 days (indices 1..4).
   for (int d = 0; d < 4; d++) {
-    dayCache[d].dow = 0;
-    dayCache[d].high = -1000.0f;
-    dayCache[d].low  =  1000.0f;
-    dayCache[d].id   = 0;
-    dayCache[d].pop  = 0.0f;
-  }
-  time_t nowLocal = TIMEZONE.toLocal(now(), &tz1_Code);
-  int todayDay = day(nowLocal);
-  int filled = 0;
-  int lastDayKey = todayDay;
-  int dayBestSlotIdx = -1;
-  uint8_t dayBestHourDist = 24;
-  for (int i = 0; i < MAX_DAYS * 8 && filled < 4; i++) {
-    time_t local = TIMEZONE.toLocal(forecast->dt[i], &tz1_Code);
-    int dKey = day(local);
-    if (dKey == todayDay) continue;
-    if (filled == 0 || dKey != lastDayKey) {
-      // commit previous day's representative id from best slot
-      if (filled > 0 && dayBestSlotIdx >= 0) {
-        dayCache[filled - 1].id = forecast->id[dayBestSlotIdx];
-      }
-      if (filled >= 4) break;
-      lastDayKey = dKey;
-      dayCache[filled].dow = weekday(local);  // 1..7
-      dayBestSlotIdx = i;
-      dayBestHourDist = abs((int)hour(local) - 13);
-      filled++;
+    int srcIdx = d + 1;
+    if (srcIdx < OMForecast::DAILY_COUNT && forecast->daily_dt[srcIdx] != 0) {
+      time_t local = TIMEZONE.toLocal(forecast->daily_dt[srcIdx], &tz1_Code);
+      dayCache[d].dow  = weekday(local);
+      dayCache[d].high = forecast->daily_max[srcIdx];
+      dayCache[d].low  = forecast->daily_min[srcIdx];
+      dayCache[d].id   = forecast->daily_code[srcIdx];
+      dayCache[d].pop  = forecast->daily_pop_max[srcIdx] / 100.0f;
     } else {
-      uint8_t hd = abs((int)hour(local) - 13);
-      if (hd < dayBestHourDist) {
-        dayBestHourDist = hd;
-        dayBestSlotIdx = i;
-      }
+      dayCache[d].dow = 0;
     }
-    DayCache& dc = dayCache[filled - 1];
-    if (forecast->temp_max[i] > dc.high) dc.high = forecast->temp_max[i];
-    if (forecast->temp_min[i] < dc.low)  dc.low  = forecast->temp_min[i];
-    if (forecast->pop[i]      > dc.pop)  dc.pop  = forecast->pop[i];
-  }
-  // commit last day's icon id
-  if (filled > 0 && dayBestSlotIdx >= 0) {
-    dayCache[filled - 1].id = forecast->id[dayBestSlotIdx];
   }
 
   // Singleton fields
-  cachedSunrise    = forecast->sunrise;
-  cachedSunset     = forecast->sunset;
-  cachedHumidity   = forecast->humidity[0];
-  cachedClouds     = forecast->clouds_all[0];
-  // Moon
-  time_t local0 = TIMEZONE.toLocal(forecast->dt[0], &tz1_Code);
+  cachedSunrise    = forecast->daily_sunrise[0];
+  cachedSunset     = forecast->daily_sunset[0];
+  cachedHumidity   = forecast->humidity;
+  cachedClouds     = forecast->clouds;
+  // Moon — basis is "now" since the current block reflects current conditions.
+  time_t local0 = TIMEZONE.toLocal(now(), &tz1_Code);
   int ip;
   cachedMoonIcon     = moon_phase(year(local0), month(local0), day(local0), hour(local0), &ip);
   cachedMoonPhaseIdx = ip;
@@ -942,77 +1039,49 @@ void drawDailyForecast(void) {
 ***************************************************************************************/
 void printWeather(void) {
 #ifdef SERIAL_MESSAGES
-  Serial.println("Weather from OpenWeather\n");
+  if (!forecast) return;
+  Serial.println("Weather from Open-Meteo\n");
 
-  Serial.print("city_name           : ");
-  Serial.println(forecast->city_name);
-  Serial.print("sunrise             : ");
-  Serial.println(strTime(forecast->sunrise));
-  Serial.print("sunset              : ");
-  Serial.println(strTime(forecast->sunset));
-  Serial.print("Latitude            : ");
-  Serial.println(ow.lat);
-  Serial.print("Longitude           : ");
-  Serial.println(ow.lon);
-  // We can use the timezone to set the offset eventually...
-  Serial.print("Timezone            : ");
-  Serial.println(forecast->timezone);
+  Serial.print("Latitude            : "); Serial.println(latitude);
+  Serial.print("Longitude           : "); Serial.println(longitude);
   Serial.println();
 
-  if (forecast) {
-    Serial.println("###############  Forecast weather  ###############\n");
-    for (int i = 0; i < (MAX_DAYS * 8); i++) {
-      Serial.print("3 hourly forecast   ");
-      if (i < 10) Serial.print(" ");
-      Serial.print(i);
-      Serial.println();
-      Serial.print("dt (time)        : ");
-      Serial.println(strTime(forecast->dt[i]));
+  Serial.println("##############  Current  ##############");
+  Serial.print("temp                : "); Serial.println(forecast->temp);
+  Serial.print("feels_like          : "); Serial.println(forecast->feels_like);
+  Serial.print("humidity            : "); Serial.println(forecast->humidity);
+  Serial.print("pressure (hPa)      : "); Serial.println(forecast->pressure);
+  Serial.print("wind_speed          : "); Serial.println(forecast->wind_speed);
+  Serial.print("wind_deg            : "); Serial.println(forecast->wind_deg);
+  Serial.print("cloud_cover (%)     : "); Serial.println(forecast->clouds);
+  Serial.print("visibility (m)      : "); Serial.println(forecast->visibility);
+  Serial.print("weather_code        : ");
+  Serial.print(forecast->code); Serial.print(" (");
+  Serial.print(weatherCodeLabel(forecast->code)); Serial.println(")");
+  Serial.print("sunrise             : "); Serial.println(strTime(forecast->daily_sunrise[0]));
+  Serial.print("sunset              : "); Serial.println(strTime(forecast->daily_sunset[0]));
+  Serial.println();
 
-      Serial.print("temp             : ");
-      Serial.println(forecast->temp[i]);
-      Serial.print("temp.min         : ");
-      Serial.println(forecast->temp_min[i]);
-      Serial.print("temp.max         : ");
-      Serial.println(forecast->temp_max[i]);
+  Serial.println("##############  Hourly (next 16h)  ##############");
+  for (int i = 0; i < OMForecast::HOURLY_COUNT; i++) {
+    if (forecast->hourly_dt[i] == 0) continue;
+    Serial.print("dt:"); Serial.print(strTime(forecast->hourly_dt[i]));
+    Serial.print("  temp:"); Serial.print(forecast->hourly_temp[i]);
+    Serial.print("  code:"); Serial.print(forecast->hourly_code[i]);
+    Serial.print(" ("); Serial.print(weatherCodeLabel(forecast->hourly_code[i])); Serial.print(")");
+    Serial.print("  pop:"); Serial.println(forecast->hourly_pop[i]);
+  }
+  Serial.println();
 
-      Serial.print("pressure         : ");
-      Serial.println(forecast->pressure[i]);
-      Serial.print("sea_level        : ");
-      Serial.println(forecast->sea_level[i]);
-      Serial.print("grnd_level       : ");
-      Serial.println(forecast->grnd_level[i]);
-      Serial.print("humidity         : ");
-      Serial.println(forecast->humidity[i]);
-
-      Serial.print("clouds           : ");
-      Serial.println(forecast->clouds_all[i]);
-      Serial.print("wind_speed       : ");
-      Serial.println(forecast->wind_speed[i]);
-      Serial.print("wind_deg         : ");
-      Serial.println(forecast->wind_deg[i]);
-      Serial.print("wind_gust        : ");
-      Serial.println(forecast->wind_gust[i]);
-
-      Serial.print("visibility       : ");
-      Serial.println(forecast->visibility[i]);
-      Serial.print("pop              : ");
-      Serial.println(forecast->pop[i]);
-      Serial.println();
-
-      Serial.print("dt_txt           : ");
-      Serial.println(forecast->dt_txt[i]);
-      Serial.print("id               : ");
-      Serial.println(forecast->id[i]);
-      Serial.print("main             : ");
-      Serial.println(forecast->main[i]);
-      Serial.print("description      : ");
-      Serial.println(forecast->description[i]);
-      Serial.print("icon             : ");
-      Serial.println(forecast->icon[i]);
-
-      Serial.println();
-    }
+  Serial.println("##############  Daily  ##############");
+  for (int i = 0; i < OMForecast::DAILY_COUNT; i++) {
+    if (forecast->daily_dt[i] == 0) continue;
+    Serial.print("day:"); Serial.print(strDate(forecast->daily_dt[i]));
+    Serial.print("  max:"); Serial.print(forecast->daily_max[i]);
+    Serial.print("  min:"); Serial.print(forecast->daily_min[i]);
+    Serial.print("  code:"); Serial.print(forecast->daily_code[i]);
+    Serial.print(" ("); Serial.print(weatherCodeLabel(forecast->daily_code[i])); Serial.print(")");
+    Serial.print("  pop:"); Serial.println(forecast->daily_pop_max[i]);
   }
 #endif
 }

@@ -32,8 +32,8 @@ If `TFT_HEIGHT==320 && TFT_WIDTH==240`, `CGRAM_OFFSET` is **not** auto-defined, 
 
 All user-facing settings live in [src/All_Settings.h](src/All_Settings.h):
 - WiFi credentials (`WIFI_SSID`, `WIFI_PASSWORD`)
-- OpenWeatherMap API key (`api_key`) — free tier, up to 1000 requests/day
 - Location as decimal lat/long (`latitude`, `longitude`)
+- Weather data is fetched from [Open-Meteo](https://open-meteo.com/) — no API key required (free tier: 10,000 requests/day for non-commercial use)
 - Timezone (`TIMEZONE`) — pick a `Timezone` object defined in [src/NTP_Time.h](src/NTP_Time.h) (e.g. `usCT`, `usET`, `euCET`, `UK`, `ausET`)
 - Units (`"metric"` or `"imperial"`)
 - Update interval (`UPDATE_INTERVAL_SECS`, default 30 min)
@@ -55,11 +55,13 @@ loop()   →  every UPDATE_INTERVAL_SECS:  updateData() (refetch + recache + red
          →  every 15 s (hardcoded):      cycle currentPage and redraw page body
 ```
 
-Forecast data is heap-allocated as `OW_forecast* forecast` at the start of `updateData()` and **deleted at the end of the same call** to reclaim ~4 KB of RAM. Anything that needs forecast data outside that window must read from the cache structs (`slotCache[4]`, `dayCache[4]`, and the `cached*` scalars) populated by `cacheForecastData()`. Drawing functions invoked during page cycling read only from the cache — never from `forecast` directly.
+Forecast data is heap-allocated as `OMForecast* forecast` at the start of `updateData()` and **deleted at the end of the same call** to reclaim memory. Anything that needs forecast data outside that window must read from the cache structs (`slotCache[4]`, `dayCache[4]`, and the `cached*` scalars) populated by `cacheForecastData()`. Drawing functions invoked during page cycling read only from the cache — never from `forecast` directly.
+
+The HTTP fetch happens in `fetchOpenMeteo(OMForecast*)` — it builds the Open-Meteo URL based on the configured units, performs an HTTPS GET via `WiFiClientSecure` (cert validation skipped via `setInsecure()`), and parses the response with ArduinoJson v7. The `OMForecast` struct holds three sections: `current` scalars, a 16-entry `hourly_*` array (1h spacing, index 0 aligned to first hour after `now()`), and a 5-entry `daily_*` array (today at index 0).
 
 Files:
 
-- **[src/Esp32_CYD_TFT_eSPI_OpenWeather_LittleFS_v02.ino](src/Esp32_CYD_TFT_eSPI_OpenWeather_LittleFS_v02.ino)** — main sketch. Owns the `TFT_eSPI tft`, `OW_Weather ow`, and `OW_forecast* forecast` globals. Holds the carousel state (`currentPage`, `lastPageCycle`) and all draw functions.
+- **[src/Esp32_CYD_TFT_eSPI_OpenWeather_LittleFS_v02.ino](src/Esp32_CYD_TFT_eSPI_OpenWeather_LittleFS_v02.ino)** — main sketch. Owns the `TFT_eSPI tft` and `OMForecast* forecast` globals. Holds the carousel state (`currentPage`, `lastPageCycle`) and all draw functions.
 - **[src/All_Settings.h](src/All_Settings.h)** — included by the `.ino`; all `#define`s and `const` settings. Edit this file for any deployment change.
 - **[src/NTP_Time.h](src/NTP_Time.h)** — included by the `.ino`; defines all timezone rules, NTP UDP logic, and the `syncTime()` function. Also declares `lastMinute` and `tz1_Code` used in the main loop.
 - **[src/GfxUi.h](src/GfxUi.h) / [src/GfxUi.cpp](src/GfxUi.cpp)** — the `GfxUi` class wraps `TFT_eSPI` to provide `drawBmp()` (reads 24-bit BMP from LittleFS) and `drawProgressBar()`. `BUFFPIXEL 32` is tuned for LittleFS SPI pipeline; increase to 80 only for SD card use.
@@ -88,9 +90,9 @@ The display is treated as **portrait 240×320** in the code (`tft.setRotation(0)
 |--------|---------|---------|
 | Quote area | 53–240 | Random motivational quote, refreshed each page cycle |
 
-Weather icons are BMP files in `data/icon/` (100×100) and `data/icon50/` (50×50). The icon filename is determined by `getMeteoconIcon(id, when)` which maps OpenWeatherMap condition IDs; for clear/partly-cloudy ids (8xx) the function compares the seconds-of-day of `when` against today's sunrise/sunset and offsets the id by +1000 (night variant) when outside the day window. The day window wraps correctly when sunset crosses midnight UTC.
+Weather icons are BMP files in `data/icon/` (100×100) and `data/icon50/` (50×50). The icon filename is determined by `getMeteoconIcon(code, when)` which maps Open-Meteo / WMO weather codes; for codes 0–2 (clear & partly cloudy) the function compares the seconds-of-day of `when` against today's sunrise/sunset to pick the day or night variant. The day window wraps correctly when sunset crosses midnight UTC. `weatherCodeLabel(code)` provides the short text label shown on screen (Open-Meteo doesn't ship one).
 
-The 4 forecast slots show **3-hour windows** (OWM free 5-day endpoint), not hourly. A 3-hour block with any rain in it gets a 5xx id and a rain icon — this is OWM behaviour, not a bug. The full forecast (id, main, description, pop) is dumped to serial when `SERIAL_MESSAGES` is defined.
+The 4 forecast slots are sampled from Open-Meteo's hourly array at 3-hour spacing (indices 0/3/6/9) so the visual cadence matches the prior 3-hour-window layout. Daily highs/lows come straight from `daily.temperature_2m_max/min` — no aggregation needed. Full per-section dumps go to serial when `SERIAL_MESSAGES` is defined.
 
 ## Debug Flags
 

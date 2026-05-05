@@ -9,7 +9,7 @@ Based on the original by [AndroidCrypto](https://github.com/AndroidCrypto/ESP32_
 - **2-page bottom carousel** — cycles every 15 seconds between Page 1 (hourly forecast + astronomy) and Page 2 (4-day forecast + random quote)
 - **Fixed brightness** — set via `#define SCREEN_BRIGHTNESS` in [src/All_Settings.h](src/All_Settings.h) (0–255, default 150)
 - **Night mode** — backlight cuts off at `NIGHT_OFF_HOUR:59` and restores at `NIGHT_ON_HOUR:00`
-- **Auto-refresh** — weather data fetched every 30 minutes; uses only the free OpenWeatherMap forecast endpoint
+- **Auto-refresh** — weather data fetched every 30 minutes from [Open-Meteo](https://open-meteo.com/) — no API key required (free tier: 10,000 requests/day for non-commercial use)
 
 ## Display Layout
 
@@ -54,19 +54,13 @@ The bottom section cycles every 15 seconds between two pages.
 
 ## Getting Started
 
-### 1. Get an OpenWeatherMap API key
+### 1. Configure `All_Settings.h`
 
-Sign up for a free account at [openweathermap.org](https://openweathermap.org/). The free tier allows up to 1000 requests/day (~40/hour), which is well above the 30-minute update interval used here.
-
-### 2. Configure `All_Settings.h`
-
-Edit [src/All_Settings.h](src/All_Settings.h):
+Weather data comes from [Open-Meteo](https://open-meteo.com/) — no API key needed. Edit [src/All_Settings.h](src/All_Settings.h):
 
 ```cpp
 #define WIFI_SSID      "your-network-name"
 #define WIFI_PASSWORD  "your-password"
-
-const String api_key = "your-openweathermap-api-key";
 
 // Set to at least 4 decimal places for accuracy
 const String latitude  = "40.749778527083656";
@@ -94,15 +88,14 @@ const String units = "metric";  // or "imperial"
 
 To add a timezone not listed, add `TimeChangeRule` pairs to `NTP_Time.h` following the existing pattern.
 
-### 3. Install required libraries
+### 2. Install required libraries
 
 PlatformIO pulls these automatically from `lib_deps` in `platformio.ini`:
 
 | Library | Version | Source |
 |---------|---------|--------|
 | TFT_eSPI | 2.4.3+ | [Bodmer/TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) |
-| OpenWeather | Feb 16 2023+ | [Bodmer/OpenWeather](https://github.com/Bodmer/OpenWeather) |
-| JSON_Decoder | — | **GitHub only** — [Bodmer/JSON_Decoder](https://github.com/Bodmer/JSON_Decoder) ⚠️ do not use the IDE library manager version |
+| ArduinoJson | 7.0.0+ | [bblanchon/ArduinoJson](https://arduinojson.org/) |
 | TJpg_Decoder | 1.1.0+ | [Bodmer/TJpg_Decoder](https://github.com/Bodmer/TJpg_Decoder) |
 | Timezone | 1.2.4 | [JChristensen/Timezone](https://github.com/JChristensen/Timezone) |
 | Time | — | Arduino Library Manager (PaulStoffregen) |
@@ -153,8 +146,7 @@ monitor_speed = 250000
 
 lib_deps =
     bodmer/TFT_eSPI @ ^2.4.3
-    https://github.com/Bodmer/OpenWeather    ; GitHub only — not in PlatformIO registry
-    https://github.com/Bodmer/JSON_Decoder   ; GitHub only — do not use registry version
+    bblanchon/ArduinoJson @ ^7.0.0
     bodmer/TJpg_Decoder @ ^1.1.0
     JChristensen/Timezone @ ^1.2.4
     PaulStoffregen/Time
@@ -196,7 +188,7 @@ build_flags =
 | White/inverted colours | Confirm `-DTFT_INVERSION_OFF` is in build_flags for the ST7789 panel |
 | Blank/garbled display | Verify the correct TFT_eSPI driver is set in `platformio.ini` build_flags |
 | Hangs on "Flash FS initialisation failed!" | LittleFS partition too small, or filesystem not yet uploaded (run Step 1 above) |
-| Weather data shows "Failed to get data points" | Check API key and lat/long in `All_Settings.h`; verify WiFi via Serial monitor at 250000 baud |
+| Weather data shows "Failed to get data points" | Check lat/long in `All_Settings.h`; verify WiFi via Serial monitor at 250000 baud — Open-Meteo returns HTTP 400 for malformed coords |
 | Corrupted filesystem after failed upload | Uncomment `#define FORMAT_LittleFS` in the main `.ino`, flash once to wipe, then re-comment and re-upload |
 | Time shows wrong zone | Ensure `#define TIMEZONE` in `All_Settings.h` matches a zone defined in `NTP_Time.h` |
 | Brightness too dim or too bright | Adjust `#define SCREEN_BRIGHTNESS` in `All_Settings.h` (0–255) and re-flash |
@@ -221,4 +213,4 @@ espressif32 platform (arduino-esp32 boards 3.2.0)  https://github.com/espressif/
 
 ## Credits
 
-Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Extended for the CYD platform with moon phase display, barometric pressure, cloud cover, humidity, and forecast strip by [AndroidCrypto](https://github.com/AndroidCrypto). Further extended with a 2-page carousel, night mode, feels-like temperature, pressure trend arrow, and motivational quotes by [Pranav E K](https://github.com/pranavek).
+Original sketch by [Daniel Eichhorn](https://blog.squix.ch), adapted by [Bodmer](https://github.com/Bodmer/OpenWeather) for the OpenWeather library. Extended for the CYD platform with moon phase display, barometric pressure, cloud cover, humidity, and forecast strip by [AndroidCrypto](https://github.com/AndroidCrypto). Further extended with a 2-page carousel, night mode, feels-like temperature, pressure trend arrow, and motivational quotes by [Pranav E K](https://github.com/pranavek). Migrated from OpenWeatherMap to [Open-Meteo](https://open-meteo.com/) for keyless operation.

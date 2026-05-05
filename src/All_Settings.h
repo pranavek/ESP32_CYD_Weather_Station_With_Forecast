@@ -6,7 +6,7 @@
 // Pick a Timezone object defined in NTP_Time.h (e.g. usCT, usET, euCET, UK, ausET).
 #define TIMEZONE usCT
 
-// Update every 30 minutes — OpenWeatherMap free tier allows 1000 req/day.
+// Update every 30 minutes — Open-Meteo free tier allows 10000 req/day for non-commercial use.
 const int UPDATE_INTERVAL_SECS = 30UL * 60UL;
 
 // Screen off hours — backlight cuts at NIGHT_OFF_HOUR:59, comes back at NIGHT_ON_HOUR:00
@@ -22,15 +22,9 @@ const int UPDATE_INTERVAL_SECS = 30UL * 60UL;
 // "metric" or "imperial"
 const String units = "metric";
 
-// Sign up at https://openweathermap.org/ for a free key.
-const String api_key = "-your-openweathermap.org api key-";
-
 // New York, Empire State Building — replace with your location.
 const String latitude  = "40.749778527083656";  // -90 to 90 (negative south)
 const String longitude = "-73.98629815117553";  // -180 to 180 (negative west)
-
-// Language code — see https://openweathermap.org/current#multi
-const String language = "en";
 
 // Short day-of-week abbreviations (change for your language).
 const String shortDOW[8] = { "???", "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
