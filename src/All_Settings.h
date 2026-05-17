@@ -16,6 +16,14 @@ const int UPDATE_INTERVAL_SECS = 30UL * 60UL;
 // Fixed screen brightness, 0–255.
 #define SCREEN_BRIGHTNESS 150
 
+// Onboard RGB LED — 2432S028R wires the LED to these pins, active LOW.
+// Color tracks the current weather; LED is off during night mode.
+#define LED_R_PIN 4
+#define LED_G_PIN 16
+#define LED_B_PIN 17
+// Peak per-channel duty (0–255). Keep low — the LED is tiny and bright.
+#define LED_BRIGHTNESS 64
+
 // Number of carousel pages for the bottom two sections
 #define PAGE_COUNT 2
 

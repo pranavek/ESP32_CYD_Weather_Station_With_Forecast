@@ -144,6 +144,7 @@ uint8_t   cachedHumidity = 0;
 uint8_t   cachedClouds = 0;
 uint8_t   cachedMoonIcon = 0;
 uint8_t   cachedMoonPhaseIdx = 0;
+uint16_t  cachedCurrentId = 0;
 bool      cacheValid = false;
 
 
@@ -178,6 +179,8 @@ void drawQuote(void);
 void drawDailyForecast(void);
 void setBacklight(uint8_t level);
 void updateBrightness(bool nightMode);
+void setupLed();
+void updateLed(bool active, uint16_t weatherId);
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   // Stop further decoding as image is running off bottom of screen
@@ -206,6 +209,8 @@ void setup() {
   ledcSetup(0, 5000, 8);          // channel 0, 5 kHz, 8-bit
   ledcAttachPin(TFT_BL, 0);
   setBacklight(SCREEN_BRIGHTNESS);
+
+  setupLed();
 
   if (!LittleFS.begin()) {
     Serial.println("Flash FS initialisation failed!");
@@ -288,6 +293,7 @@ void loop() {
                    ((h < NIGHT_ON_HOUR) || (h == NIGHT_OFF_HOUR && m >= 59));
 
   updateBrightness(nightMode);
+  updateLed(!nightMode && cacheValid, cachedCurrentId);
 
   // Weather update — timer not advanced during night so wake-up fetch is immediate
   if (booted || (millis() - lastDownloadUpdate > 1000UL * UPDATE_INTERVAL_SECS)) {
@@ -763,6 +769,57 @@ void updateBrightness(bool nightMode) {
 }
 
 /***************************************************************************************
+**                          Onboard RGB LED — color tracks current weather
+***************************************************************************************/
+// LEDC channels 1/2/3 — channel 0 is the TFT backlight.
+#define LED_R_CHAN 1
+#define LED_G_CHAN 2
+#define LED_B_CHAN 3
+
+void setupLed() {
+  ledcSetup(LED_R_CHAN, 5000, 8);
+  ledcSetup(LED_G_CHAN, 5000, 8);
+  ledcSetup(LED_B_CHAN, 5000, 8);
+  ledcAttachPin(LED_R_PIN, LED_R_CHAN);
+  ledcAttachPin(LED_G_PIN, LED_G_CHAN);
+  ledcAttachPin(LED_B_PIN, LED_B_CHAN);
+  updateLed(false, 0);  // start dark
+}
+
+// Map an OWM condition id to an RGB triple scaled to LED_BRIGHTNESS.
+static void weatherIdToRgb(uint16_t id, uint8_t& r, uint8_t& g, uint8_t& b) {
+  // Base colors (full duty), then scaled.
+  uint8_t br = 0, bg = 0, bb = 0;
+  uint16_t group = id / 100;
+  switch (group) {
+    case 2:  br = 180; bg =   0; bb = 220; break;  // thunderstorm — purple
+    case 3:  br =   0; bg = 180; bb = 255; break;  // drizzle      — light blue
+    case 5:  br =   0; bg =  60; bb = 255; break;  // rain         — blue
+    case 6:  br = 255; bg = 255; bb = 255; break;  // snow         — white
+    case 7:  br = 120; bg = 120; bb = 120; break;  // atmosphere   — grey
+    case 8:
+      if (id == 800)        { br = 255; bg = 180; bb =   0; }   // clear  — warm yellow
+      else if (id <= 802)   { br = 200; bg = 200; bb = 220; }   // few/scattered clouds — soft white
+      else                  { br =  80; bg =  80; bb = 120; }   // broken/overcast — dim blue-grey
+      break;
+    default: br = 0; bg = 0; bb = 0; break;
+  }
+  // Scale by LED_BRIGHTNESS (0..255) using integer math.
+  r = (uint16_t)br * LED_BRIGHTNESS / 255;
+  g = (uint16_t)bg * LED_BRIGHTNESS / 255;
+  b = (uint16_t)bb * LED_BRIGHTNESS / 255;
+}
+
+void updateLed(bool active, uint16_t weatherId) {
+  uint8_t r = 0, g = 0, b = 0;
+  if (active) weatherIdToRgb(weatherId, r, g, b);
+  // Active LOW — invert duty so 0 input → channel off (255 duty = pin high).
+  ledcWrite(LED_R_CHAN, 255 - r);
+  ledcWrite(LED_G_CHAN, 255 - g);
+  ledcWrite(LED_B_CHAN, 255 - b);
+}
+
+/***************************************************************************************
 **                          Cache forecast data before forecast pointer is freed
 ***************************************************************************************/
 void cacheForecastData(void) {
@@ -831,6 +888,7 @@ void cacheForecastData(void) {
   cachedSunset     = forecast->sunset;
   cachedHumidity   = forecast->humidity[0];
   cachedClouds     = forecast->clouds_all[0];
+  cachedCurrentId  = forecast->id[0];
   // Moon
   time_t local0 = TIMEZONE.toLocal(forecast->dt[0], &tz1_Code);
   int ip;
